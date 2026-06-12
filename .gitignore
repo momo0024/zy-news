@@ -1,0 +1,91 @@
+# ============================================================
+# zy-news Python 项目 Git 忽略规则
+# ============================================================
+
+# --- 环境变量与密钥 (切勿提交) ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- 虚拟环境 ---
+.venv/
+venv/
+env/
+ENV/
+
+# --- 测试与覆盖率 ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# --- 类型检查 ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+# --- 日志与输出 ---
+logs/
+*.log
+output/
+*.json.bak
+
+# --- Playwright ---
+playwright-report/
+test-results/
+.playwright/
+
+# --- IDE / 编辑器 ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# --- 操作系统 ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- 临时文件 ---
+*.tmp
+*.temp
+*.bak
+.cache/
