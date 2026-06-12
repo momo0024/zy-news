@@ -260,6 +260,7 @@ async def list_crawl_sites():
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
             SELECT id, site_name, site_url, search_url_template,
+                   category, media_type, supervisor,
                    is_active, sort_order, description
             FROM crawl_sites ORDER BY sort_order
         """))).mappings().fetchall()

@@ -199,9 +199,12 @@ class LogConfig:
 CRAWL_SITES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS crawl_sites (
     id                  SERIAL PRIMARY KEY,
-    site_name           VARCHAR(200) NOT NULL,
+    site_name           VARCHAR(200) NOT NULL UNIQUE,
     site_url            VARCHAR(1000),
     search_url_template VARCHAR(2000) NOT NULL,
+    category            VARCHAR(50),
+    media_type          VARCHAR(50),
+    supervisor          VARCHAR(500),
     is_active           BOOLEAN DEFAULT TRUE,
     sort_order          INTEGER DEFAULT 0,
     description         VARCHAR(500),
@@ -214,6 +217,9 @@ COMMENT ON COLUMN crawl_sites.id IS '主键自增ID';
 COMMENT ON COLUMN crawl_sites.site_name IS '网站名称（如：百度新闻、新浪新闻）';
 COMMENT ON COLUMN crawl_sites.site_url IS '网站首页地址';
 COMMENT ON COLUMN crawl_sites.search_url_template IS '搜索URL模板，{keyword}为占位符，例：https://www.baidu.com/s?tn=news&word={keyword}';
+COMMENT ON COLUMN crawl_sites.category IS '媒体类别：中央级/各部委级/省级/经济特区/财经科技/财经报纸/研究院/湖北省级/市级';
+COMMENT ON COLUMN crawl_sites.media_type IS '媒体类型：报纸/网站/通讯社/电视台/期刊/智库/新媒体/融媒体平台/研究机构/财经杂志';
+COMMENT ON COLUMN crawl_sites.supervisor IS '主管/主办单位';
 COMMENT ON COLUMN crawl_sites.is_active IS '是否启用：TRUE=启用爬取，FALSE=暂停';
 COMMENT ON COLUMN crawl_sites.sort_order IS '排序权重，越小越优先';
 COMMENT ON COLUMN crawl_sites.description IS '备注说明';
