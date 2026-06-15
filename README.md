@@ -121,15 +121,15 @@ API 文档：启动后访问 `http://localhost:8000/docs`
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/news/list` | 新闻列表（分页、筛选） |
-| GET | `/api/news/search?q=` | 关键词搜索 |
-| GET | `/api/news/{id}` | 新闻详情 |
-| GET | `/api/sources` | 新闻来源列表 |
-| GET | `/api/keywords/list` | 已匹配关键词 |
-| GET | `/api/crawl-keywords` | 爬取关键词配置 |
-| POST | `/api/crawl-keywords` | 新增爬取关键词 |
-| GET | `/api/sites` | 爬取站点配置 |
-| GET | `/api/stats` | 数据统计概览 |
+| GET | `/news/list` | 新闻列表（分页、筛选；`include_summary=1` 附带概览统计） |
+| GET | `/news/search?q=` | 关键词搜索 |
+| GET | `/news/{id}` | 新闻详情 |
+| GET | `/sources` | 新闻来源列表 |
+| GET | `/keywords/list` | 已匹配关键词 |
+| GET | `/crawl-keywords` | 爬取关键词配置 |
+| POST | `/crawl-keywords` | 新增爬取关键词 |
+| GET | `/sites` | 爬取站点配置 |
+| GET | `/stats` | 数据统计概览 |
 
 ## 命令行参数
 

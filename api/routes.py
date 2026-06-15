@@ -11,8 +11,9 @@ from sqlalchemy import text
 from loguru import logger
 
 from db.pool import get_engine
+from utils.timezone import APP_TZ, format_app_datetime
 
-router = APIRouter(prefix="/api", tags=["news"])
+router = APIRouter(tags=["news"])
 
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
@@ -23,14 +24,16 @@ async def list_news(
     page: int = Query(1, ge=1, description="页码，从 1 开始"),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="每页条数"),
     keyword: Optional[str] = Query(None, description="关键词搜索 (匹配标题和内容)"),
-    source: Optional[str] = Query(None, description="新闻来源筛选"),
+    matched_keywords: Optional[str] = Query(None, description="关键词标签筛选 (匹配 matched_keyword，空格分隔)"),
+    site_id: Optional[int] = Query(None, description="新闻网站ID筛选"),
     category: Optional[str] = Query(None, description="分类筛选: 政策/技术/产业/人才/资金/其他"),
     start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
     sort_by: str = Query("publish_time", description="排序字段: publish_time / fetch_time"),
     sort_order: str = Query("desc", description="排序方向: asc / desc"),
+    include_summary: bool = Query(False, description="是否附带概览统计（今日更新、覆盖来源）"),
 ):
-    """新闻列表接口 (分页 + 多条件筛选)"""
+    """新闻列表接口 (分页 + 多条件筛选，可选附带概览统计)"""
     engine = await get_engine()
 
     conditions = []
@@ -40,9 +43,17 @@ async def list_news(
         conditions.append("(title ILIKE :kw OR content ILIKE :kw)")
         params["kw"] = f"%{keyword}%"
 
-    if source:
-        conditions.append("source = :src")
-        params["src"] = source
+    if matched_keywords:
+        kw_list = [k.strip() for k in matched_keywords.split() if k.strip()]
+        if kw_list:
+            placeholders = ", ".join(f":mkw{i}" for i in range(len(kw_list)))
+            for i, k in enumerate(kw_list):
+                params[f"mkw{i}"] = k
+            conditions.append(f"matched_keyword IN ({placeholders})")
+
+    if site_id:
+        conditions.append("crawl_site_id = :sid")
+        params["sid"] = site_id
 
     if category:
         conditions.append("category = :cat")
@@ -93,17 +104,41 @@ async def list_news(
         items = [dict(r) for r in rows]
         _serialize(items)
 
+        summary = None
+        if include_summary:
+            today_count = (await conn.execute(
+                text("""
+                    SELECT COUNT(*) FROM news_data
+                    WHERE (publish_time AT TIME ZONE :tz)::date = (NOW() AT TIME ZONE :tz)::date
+                """),
+                {"tz": str(APP_TZ)},
+            )).scalar()
+            total_sources = (await conn.execute(
+                text("SELECT COUNT(DISTINCT source) FROM news_data WHERE source IS NOT NULL")
+            )).scalar()
+            summary = {
+                "today_news": today_count,
+                "total_sources": total_sources,
+            }
+
         logger.info(f"[API] 新闻列表: page={page}, total={total}")
-        return {
-            "code": 0, "message": "ok",
-            "data": {
-                "items": items,
-                "pagination": {
-                    "page": page, "page_size": page_size,
-                    "total": total, "total_pages": total_pages,
-                },
+        payload: dict = {
+            "items": items,
+            "pagination": {
+                "page": page, "page_size": page_size,
+                "total": total, "total_pages": total_pages,
             },
         }
+
+        # 关键词列表：从新闻表中聚合去重
+        keywords_rows = (await conn.execute(
+            text("SELECT DISTINCT matched_keyword FROM news_data WHERE matched_keyword IS NOT NULL ORDER BY matched_keyword")
+        )).fetchall()
+        payload["keywords"] = [r[0] for r in keywords_rows]
+
+        if summary is not None:
+            payload["summary"] = summary
+        return {"code": 0, "message": "ok", "data": payload}
 
 
 @router.get("/news/search")
@@ -186,13 +221,13 @@ async def get_news_detail(news_id: int):
 
 @router.get("/sources")
 async def list_sources():
-    """获取所有新闻来源 (从爬取站点配置中读取)"""
+    """获取所有新闻来源 (从爬取站点配置中读取，返回 id 和 site_name)"""
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(
-            text("SELECT site_name FROM crawl_sites WHERE is_active = TRUE ORDER BY sort_order")
-        )).fetchall()
-        sources = [r[0] for r in rows]
+            text("SELECT id, site_name FROM crawl_sites WHERE is_active = TRUE ORDER BY sort_order")
+        )).mappings().fetchall()
+        sources = [{"id": r["id"], "site_name": r["site_name"]} for r in rows]
     return {"code": 0, "message": "ok", "data": sources}
 
 
@@ -259,7 +294,7 @@ async def list_crawl_sites():
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
-            SELECT id, site_name, site_url, search_url_template,
+            SELECT id, site_name, site_url, search_url_template, search_url,
                    category, media_type, supervisor,
                    is_active, sort_order, description
             FROM crawl_sites ORDER BY sort_order
@@ -301,8 +336,8 @@ async def get_stats():
 
 
 def _serialize(items: list[dict]):
-    """处理时间字段序列化 (原地修改)"""
+    """时间字段序列化为北京时间字符串（与库内显示一致）"""
     for item in items:
         for field in ("publish_time", "fetch_time", "created_at"):
             if isinstance(item.get(field), datetime):
-                item[field] = item[field].isoformat()
+                item[field] = format_app_datetime(item[field])

@@ -146,7 +146,7 @@ class NewsCrawler:
         except Exception as e:
             logger.error(f"[{index}/{total}] 解析失败: {title[:50]} | 错误: {e}")
 
-            # 降级方案
+            # 降级方案：不使用 ScrapeGraphAI，直接用列表页已有的信息
             fallback = NewsItem(
                 title=title,
                 content=news_data.get("abstract", ""),
@@ -154,7 +154,6 @@ class NewsCrawler:
                 source=news_data.get("source", ""),
                 url=url,
                 matched_keyword=keyword,
-                summary=news_data.get("abstract", ""),
             )
             logger.info(f"[{index}/{total}] 降级处理: {fallback.title[:50]}")
             return fallback

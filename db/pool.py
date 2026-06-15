@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import (
 from loguru import logger
 
 from config import DBConfig
+from utils.timezone import APP_TZ
 
 
 def _build_async_url(config: DBConfig) -> str:
@@ -45,6 +46,7 @@ def create_engine(config: Optional[DBConfig] = None) -> AsyncEngine:
         pool_recycle=cfg.POOL_MAX_LIFETIME, # 连接回收时间
         pool_pre_ping=True,                 # 每次使用前 ping 检测有效性
         echo=False,
+        connect_args={"server_settings": {"timezone": str(APP_TZ)}},
     )
 
     logger.info(

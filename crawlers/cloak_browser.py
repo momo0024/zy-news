@@ -117,9 +117,9 @@ class CloakBrowser:
     async def human_scroll(page):
         """
         模拟人类自然滚动行为:
-        - 不是一次性滚到底，而是分多次缓慢滚动
+        - 分多次缓慢滚动到底部
         - 中途随机暂停 (模拟阅读)
-        - 偶尔回滚 (模拟回看)
+        - 不再滚回顶部（留在底部确保内容完整加载）
         """
         if not CrawlerConfig.HUMAN_RANDOM_SCROLL:
             return
@@ -131,15 +131,13 @@ class CloakBrowser:
             if scroll_height <= viewport_height * 1.2:
                 return  # 页面太短不需要滚动
 
-            # 分 3-5 段滚动
+            # 分 3-5 段滚动到底部
             segments = random.randint(3, 5)
             for i in range(segments):
-                # 每段滚动的距离 (加随机偏移)
                 target = int(scroll_height * (i + 1) / segments)
                 target += random.randint(-100, 100)
                 target = max(0, min(target, scroll_height))
 
-                # 平滑滚动
                 await page.evaluate(f"window.scrollTo({{top: {target}, behavior: 'smooth'}})")
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
@@ -147,13 +145,8 @@ class CloakBrowser:
                 if random.random() < 0.5 and i < segments - 1:
                     await asyncio.sleep(random.uniform(1.0, 3.0))
 
-            # 15% 概率回滚到顶部 (模拟回看)
-            if random.random() < 0.15:
-                await page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
-                await asyncio.sleep(random.uniform(0.5, 1.0))
-
-            # 最终回到顶部
-            await page.evaluate("window.scrollTo({top: 0, behavior: 'smooth'})")
+            # 确保最终停在底部
+            await page.evaluate("window.scrollTo({top: document.body.scrollHeight, behavior: 'smooth'})")
             await asyncio.sleep(0.5)
 
         except Exception:
@@ -173,7 +166,7 @@ class CloakBrowser:
             await page.click(selector)
             await asyncio.sleep(random.uniform(0.2, 0.5))
             for char in text:
-                await page.type(selector, char, delay=random.randint(50, 200))
+                await page.type(selector, char, delay=random.randint(50, 150))
         except Exception:
             # 降级为直接填充
             try:
