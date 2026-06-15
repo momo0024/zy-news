@@ -1,10 +1,6 @@
 """
 财经报纸类网站爬虫
 """
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from crawlers.sites.common import search_generic_with_pagination
 

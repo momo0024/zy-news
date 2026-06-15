@@ -4,16 +4,13 @@
 - 日期过滤 / 解析
 - 新闻保存到数据库
 - 通用 HTML 解析
+- 弹窗检测与重试
 """
 
 import asyncio
 import json
 import re
-import sys
 from datetime import datetime, timedelta
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from loguru import logger
 from sqlalchemy import text
@@ -88,6 +85,22 @@ def parse_generic_search_results(html: str, keyword: str, site_name: str, site_u
 
 
 # ============================================================
+# 列表去重
+# ============================================================
+
+def deduplicate_by_url(items: list[dict]) -> list[dict]:
+    """按 URL 去重，保留首次出现的条目"""
+    seen = set()
+    result = []
+    for item in items:
+        url = item.get("url", "")
+        if url and url not in seen:
+            seen.add(url)
+            result.append(item)
+    return result
+
+
+# ============================================================
 # 日期过滤
 # ============================================================
 
@@ -116,16 +129,6 @@ def _parse_item_date(item: dict) -> datetime | None:
     return None
 
 
-def has_any_recent_item(items: list[dict], keep_days: int) -> bool:
-    """检查列表中是否有最近 N 天的新闻"""
-    cutoff = datetime.now() - timedelta(days=keep_days)
-    for item in items:
-        dt = _parse_item_date(item)
-        if dt and dt >= cutoff:
-            return True
-    return False
-
-
 def all_items_are_recent(items: list[dict], keep_days: int) -> bool:
     """检查列表中是否**全部**都是最近 N 天的新闻（有一页没显示全才需要翻页）"""
     if not items:
@@ -134,8 +137,6 @@ def all_items_are_recent(items: list[dict], keep_days: int) -> bool:
     for item in items:
         dt = _parse_item_date(item)
         if dt is None or dt < cutoff:
-            # 存在无法解析日期 或 日期已超出 keep_days 的条目
-            # 说明本页已经混入了更早的新闻，近 N 天新闻已展示完毕
             return False
     return True
 
@@ -192,6 +193,119 @@ async def save_news_to_db(items: list[dict], site_id: int | None = None) -> int:
                 logger.error(f"保存失败 [{item.get('title', '')[:40]}]: {e}")
 
     return saved
+
+
+# ============================================================
+# 通用翻页循环（核心抽象）
+# ============================================================
+
+async def pagination_loop(
+    page,
+    browser: CloakBrowser,
+    site_name: str,
+    keep_days: int,
+    parse_page_func,
+    click_next_func,
+    *,
+    max_pages: int = 50,
+) -> list[dict]:
+    """
+    通用翻页循环 - 封装"解析 → 日期检查 → 翻页"的公共逻辑
+
+    Args:
+        page: Playwright page 对象
+        browser: CloakBrowser 实例
+        site_name: 网站名称（用于日志）
+        keep_days: 保留天数
+        parse_page_func: async func(page) -> list[dict]，解析当前页返回条目列表
+        click_next_func: async func(page, page_num) -> bool，翻页，返回 True 表示继续
+        max_pages: 最大翻页数
+    """
+    all_items = []
+    page_num = 0
+
+    while page_num < max_pages:
+        page_num += 1
+        await browser.human_delay(0.5, 1.5)
+        await browser.human_mouse_move(page)
+        await browser.human_scroll(page)
+
+        page_items = await parse_page_func(page)
+        if not page_items:
+            logger.debug(f"[{site_name}] 第{page_num}页无结果，停止翻页")
+            break
+
+        all_items.extend(page_items)
+
+        if not all_items_are_recent(page_items, keep_days):
+            logger.info(f"[{site_name}] 第{page_num}页已混入非近{keep_days}天新闻，停止翻页")
+            break
+
+        if not await click_next_func(page, page_num):
+            break
+
+    logger.info(f"[{site_name}] 翻页完成，共 {page_num} 页，解析 {len(all_items)} 条")
+    return all_items
+
+
+# ============================================================
+# 弹窗检测与重试
+# ============================================================
+
+async def check_and_retry_popup(
+    page,
+    site_name: str,
+    popup_keywords: list[str] = None,
+    retry_delays: list[float] = None,
+) -> bool:
+    """
+    检测页面弹窗（如"当前用户较多，请稍后重试"），自动重试
+
+    Args:
+        page: Playwright page 对象
+        site_name: 网站名称
+        popup_keywords: 弹窗提示关键词列表
+        retry_delays: 重试等待秒数列表
+
+    Returns:
+        True 表示页面正常，False 表示所有重试均失败
+    """
+    if popup_keywords is None:
+        popup_keywords = ["当前用户较多", "请稍后重试"]
+    if retry_delays is None:
+        retry_delays = [10, 30]
+
+    body_text = ""
+    try:
+        body_text = await page.locator("body").inner_text()
+    except Exception:
+        return True
+
+    if not any(kw in body_text for kw in popup_keywords):
+        return True
+
+    for attempt, delay in enumerate(retry_delays, start=1):
+        logger.warning(f"[{site_name}] 检测到弹窗，等待 {delay} 秒后重试 (第{attempt}次)...")
+        await asyncio.sleep(delay)
+        try:
+            await page.reload(wait_until="networkidle", timeout=30000)
+            await asyncio.sleep(3)
+        except Exception as e:
+            logger.warning(f"[{site_name}] 刷新失败: {e}")
+            if attempt >= len(retry_delays):
+                return False
+            continue
+        body_text = ""
+        try:
+            body_text = await page.locator("body").inner_text()
+        except Exception:
+            pass
+        if not any(kw in body_text for kw in popup_keywords):
+            logger.info(f"[{site_name}] 重试成功")
+            return True
+
+    logger.error(f"[{site_name}] 所有重试均失败，放弃")
+    return False
 
 
 # ============================================================

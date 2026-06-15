@@ -17,28 +17,7 @@ from typing import Optional, AsyncIterator
 
 from loguru import logger
 
-from config import CrawlerConfig
-
-# ============================================================
-# 随机 User-Agent 池 (Chrome / Edge / Firefox)
-# ============================================================
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-]
-
-VIEWPORTS = [
-    {"width": 1920, "height": 1080},
-    {"width": 1366, "height": 768},
-    {"width": 1536, "height": 864},
-    {"width": 1440, "height": 900},
-    {"width": 2560, "height": 1440},
-]
+from config import CrawlerConfig, USER_AGENTS, VIEWPORTS
 
 
 class CloakBrowser:
@@ -152,28 +131,6 @@ class CloakBrowser:
         except Exception:
             pass
 
-    @staticmethod
-    async def human_type(page, selector: str, text: str):
-        """
-        模拟人类逐字输入 (每个字符间有随机延迟)
-
-        Args:
-            page: Playwright Page 对象
-            selector: 输入框选择器
-            text: 要输入的文本
-        """
-        try:
-            await page.click(selector)
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-            for char in text:
-                await page.type(selector, char, delay=random.randint(50, 150))
-        except Exception:
-            # 降级为直接填充
-            try:
-                await page.fill(selector, text)
-            except Exception:
-                pass
-
     # ============================================================
     # 浏览器核心
     # ============================================================
@@ -264,7 +221,8 @@ class CloakBrowser:
 
         if self.stealth_mode:
             try:
-                from playwright_stealth import stealth_async
+                from playwright_stealth import Stealth
+                await Stealth().apply_stealth_async(self._context)
             except ImportError:
                 logger.warning("playwright-stealth 未安装，将使用内置隐匿")
                 await self._inject_stealth_scripts()
@@ -297,8 +255,11 @@ class CloakBrowser:
 
         if self.stealth_mode:
             try:
-                from playwright_stealth import stealth_async
-                await stealth_async(page)
+                from playwright_stealth import Stealth
+                # context 已在 _create_context 中应用 stealth
+                # 如果页面是后来创建的，检查是否已应用，未应用则补充
+                if not getattr(page, '_stealth_applied', False):
+                    await Stealth().apply_stealth_async(page)
             except ImportError:
                 pass
 

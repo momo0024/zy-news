@@ -4,21 +4,16 @@
 """
 
 import asyncio
-import sys
-from pathlib import Path
 from urllib.parse import urljoin, unquote, parse_qs, urlparse
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from loguru import logger
 
 from crawlers.cloak_browser import CloakBrowser
 from crawlers.sites.common import (
     all_items_are_recent,
-    filter_recent_news,
-    has_any_recent_item,
-    parse_generic_search_results,
-    save_news_to_db,
+    deduplicate_by_url,
+    check_and_retry_popup,
+    pagination_loop,
     search_generic_with_pagination,
 )
 
@@ -85,7 +80,6 @@ def _parse_cctv(html: str, keyword: str, site_name: str, site_url: str) -> list[
             title = title_el.get_text(strip=True)
             href = title_el.get("href", "")
 
-            # 央视网使用 link_p.php?targetpage=... 跳转，提取真实 URL
             url = ""
             if href.startswith("link_p.php"):
                 parsed = urlparse("https://search.cctv.com/" + href)
@@ -97,16 +91,13 @@ def _parse_cctv(html: str, keyword: str, site_name: str, site_url: str) -> list[
             else:
                 url = urljoin("https://search.cctv.com/", href)
 
-            # 摘要
             abs_el = li.select_one("p.bre")
             abstract = ""
             if abs_el:
-                # 去掉摘要中的图片
                 for img in abs_el.find_all("img"):
                     img.decompose()
                 abstract = abs_el.get_text(strip=True)
 
-            # 来源与时间
             src_tim = li.select_one(".src-tim")
             source = site_name
             pub_time = ""
@@ -151,7 +142,6 @@ async def _search_people(
     browser: CloakBrowser, search_url: str, keyword: str,
     site_name: str, site_url: str, keep_days: int,
 ) -> list[dict]:
-    all_items = []
     async with browser.session() as page:
         logger.debug(f"[人民网] 导航到搜索页: {search_url[:120]}")
         await page.goto(search_url, wait_until="networkidle", timeout=30000)
@@ -169,72 +159,71 @@ async def _search_people(
             logger.warning(f"[人民网] 精确匹配复选框操作失败: {e}")
             await page.wait_for_timeout(2000)
 
-        page_num = 0
-        max_pages = 50
-
-        while page_num < max_pages:
-            page_num += 1
-            await browser.human_delay(0.5, 1.5)
-            await browser.human_mouse_move(page)
-            await browser.human_scroll(page)
-
+        # 解析函数
+        async def parse_page(page):
             html = await page.content()
-            page_items = _parse_people(html, keyword, site_name, site_url)
-            logger.debug(f"[人民网] 第{page_num}页: {len(page_items)} 条")
+            return _parse_people(html, keyword, site_name, site_url)
 
-            if not page_items:
-                logger.debug(f"[人民网] 第{page_num}页无结果，停止翻页")
-                break
-
-            all_items.extend(page_items)
-
-            if not all_items_are_recent(page_items, keep_days):
-                logger.info(f"[人民网] 第{page_num}页已混入非近{keep_days}天新闻，停止翻页")
-                break
-
+        # 翻页函数
+        async def click_next(page, page_num):
             next_btn = page.locator("span.page-next")
             if await next_btn.count() > 0:
                 cls = await next_btn.get_attribute("class") or ""
                 if "disabled" in cls:
                     logger.debug(f"[人民网] 已到最后一页（第{page_num}页）")
-                    break
-                logger.debug(f"[人民网] 点击下一页...")
+                    return False
                 await next_btn.click()
                 await page.wait_for_timeout(2000)
                 await page.wait_for_selector("ul.article li.clear", timeout=10000)
-            else:
-                logger.debug(f"[人民网] 无下一页按钮，共 {page_num} 页")
-                break
+                return True
+            return False
 
-    logger.info(f"[人民网] 翻页完成，共 {page_num} 页，解析 {len(all_items)} 条")
-    return all_items
+        return await pagination_loop(page, browser, site_name, keep_days, parse_page, click_next)
 
 
 # ============================================================
-# 新华社：SPA + Ant Design 翻页
+# 新华社：SPA + Ant Design 翻页 + 弹窗重试
 # ============================================================
 
 async def _search_xinhua(
     browser: CloakBrowser, search_url: str, keyword: str,
     site_name: str, site_url: str, keep_days: int,
 ) -> list[dict]:
-    all_items = []
     async with browser.session() as page:
         logger.debug(f"[新华社] 导航到搜索页: {search_url[:120]}")
-        await page.goto(search_url, wait_until="networkidle", timeout=30000)
-        await page.wait_for_timeout(3000)
 
-        page_num = 0
-        max_pages = 50
+        # 初始加载 + 弹窗检测重试
+        retry_delays = [10, 30]
+        for attempt, delay in enumerate(retry_delays, start=1):
+            try:
+                await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                logger.warning(f"[新华社] 页面加载失败 (尝试{attempt}/{len(retry_delays)}): {e}")
+                if attempt < len(retry_delays):
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"[新华社] 搜索页加载多次失败，跳过")
+                    return []
 
-        while page_num < max_pages:
-            page_num += 1
-            await browser.human_delay(0.5, 1.5)
-            await browser.human_mouse_move(page)
-            await browser.human_scroll(page)
+            if await check_and_retry_popup(page, site_name):
+                break
+            if attempt >= len(retry_delays):
+                logger.error(f"[新华社] 多次重试后仍被拦截，跳过")
+                return []
+        else:
+            logger.error(f"[新华社] 所有重试均失败，跳过")
+            return []
+
+        # 解析函数
+        async def parse_page(page):
+            # 弹窗检测
+            if not await check_and_retry_popup(page, site_name):
+                return []
 
             links = await page.locator("a").all()
-            page_items = []
+            items = []
             for link in links:
                 href = await link.get_attribute("href") or ""
                 title = (await link.inner_text()).strip()
@@ -248,7 +237,7 @@ async def _search_xinhua(
                             pub_time = f"{part[:4]}-{part[4:6]}-{part[6:8]}"
                             break
 
-                    page_items.append({
+                    items.append({
                         "title": title,
                         "url": abs_url,
                         "publish_time": pub_time,
@@ -257,96 +246,55 @@ async def _search_xinhua(
                         "site_url": site_url,
                     })
 
-            seen = set()
-            unique_items = []
-            for item in page_items:
-                if item["url"] not in seen:
-                    seen.add(item["url"])
-                    unique_items.append(item)
+            return deduplicate_by_url(items)
 
-            logger.debug(f"[新华社] 第{page_num}页: {len(unique_items)} 条")
-
-            if not unique_items:
-                logger.debug(f"[新华社] 第{page_num}页无结果，停止翻页")
-                break
-
-            all_items.extend(unique_items)
-
-            if not all_items_are_recent(unique_items, keep_days):
-                logger.info(f"[新华社] 第{page_num}页已混入非近{keep_days}天新闻，停止翻页")
-                break
-
+        # 翻页函数
+        async def click_next(page, page_num):
             next_btn = page.locator("li.ant-pagination-next")
             if await next_btn.count() > 0:
                 cls = await next_btn.get_attribute("class") or ""
                 if "disabled" in cls:
                     logger.debug(f"[新华社] 已到最后一页（第{page_num}页）")
-                    break
-                logger.debug(f"[新华社] 点击下一页...")
+                    return False
                 await next_btn.click()
                 await page.wait_for_timeout(3000)
-            else:
-                logger.debug(f"[新华社] 无翻页按钮，共 {page_num} 页")
-                break
+                return True
+            return False
 
-    logger.info(f"[新华社] 翻页完成，共 {page_num} 页，解析 {len(all_items)} 条")
-    return all_items
+        return await pagination_loop(page, browser, site_name, keep_days, parse_page, click_next)
 
 
 # ============================================================
-# 央视网：服务端渲染 + URL 翻页
+# 央视网：服务端渲染 + 点击翻页
 # ============================================================
 
 async def _search_cctv(
     browser: CloakBrowser, search_url: str, keyword: str,
     site_name: str, site_url: str, keep_days: int,
 ) -> list[dict]:
-    all_items = []
     async with browser.session() as page:
         logger.debug(f"[央视网] 导航到搜索页: {search_url[:120]}")
         await page.goto(search_url, wait_until="networkidle", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        page_num = 0
-        max_pages = 50
-
-        while page_num < max_pages:
-            page_num += 1
-            await browser.human_delay(0.5, 1.5)
-            await browser.human_mouse_move(page)
-            await browser.human_scroll(page)
-
+        async def parse_page(page):
             html = await page.content()
-            page_items = _parse_cctv(html, keyword, site_name, site_url)
-            logger.debug(f"[央视网] 第{page_num}页: {len(page_items)} 条")
+            return _parse_cctv(html, keyword, site_name, site_url)
 
-            if not page_items:
-                logger.debug(f"[央视网] 第{page_num}页无结果，停止翻页")
-                break
-
-            all_items.extend(page_items)
-
-            if not all_items_are_recent(page_items, keep_days):
-                logger.info(f"[央视网] 第{page_num}页已混入非近{keep_days}天新闻，停止翻页")
-                break
-
-            # 央视网翻页：点击 .page-next
+        async def click_next(page, page_num):
             next_btn = page.locator("a.page-next")
             if await next_btn.count() > 0:
                 href = await next_btn.get_attribute("href") or ""
                 if not href or href == "javascript:void(0);":
                     logger.debug(f"[央视网] 已到最后一页（第{page_num}页）")
-                    break
-                logger.debug(f"[央视网] 点击下一页...")
+                    return False
                 await next_btn.click()
                 await page.wait_for_timeout(3000)
                 await page.wait_for_selector(".tuwenjg ul li.image", timeout=10000)
-            else:
-                logger.debug(f"[央视网] 无下一页按钮，共 {page_num} 页")
-                break
+                return True
+            return False
 
-    logger.info(f"[央视网] 翻页完成，共 {page_num} 页，解析 {len(all_items)} 条")
-    return all_items
+        return await pagination_loop(page, browser, site_name, keep_days, parse_page, click_next)
 
 
 # ============================================================
@@ -367,7 +315,6 @@ async def search(
     if "央视" in site_name or "cctv" in site_url.lower():
         return await _search_cctv(browser, search_url, keyword, site_name, site_url, keep_days)
 
-    # 其他中央级网站使用通用翻页
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,
     )

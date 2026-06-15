@@ -62,17 +62,6 @@ async def close_engine(engine: AsyncEngine):
     logger.info("SQLAlchemy 引擎已关闭")
 
 
-async def health_check(engine: AsyncEngine) -> bool:
-    """健康检查"""
-    try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return True
-    except Exception as e:
-        logger.error(f"数据库健康检查失败: {e}")
-        return False
-
-
 # ============================================================
 # 全局单例
 # ============================================================

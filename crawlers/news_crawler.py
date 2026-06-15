@@ -352,22 +352,3 @@ class NewsCrawler:
 
         logger.info(f"数据库写入: {saved}/{len(items)} 条")
 
-    def save_all_results(self):
-        """保存全部结果到汇总 JSON"""
-        all_items = []
-        for result_list in self.all_results:
-            all_items.extend(result_list.items)
-
-        summary = {
-            "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "total_news": len(all_items),
-            "keywords": self.keywords,
-            "items": [item.model_dump() for item in all_items],
-        }
-
-        filepath = self.output_dir / f"all_news_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(summary, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"汇总结果已保存: {filepath} ({len(all_items)} 条)")
-        return filepath

@@ -2,10 +2,6 @@
 湖北省内网站爬虫
 包含：湖北省级、武汉市、黄石市、十堰市、宜昌市、襄阳市、鄂州市、荆门市等
 """
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from loguru import logger
 
@@ -52,7 +48,6 @@ async def search(browser, site: dict, keyword: str, keep_days: int, search_url: 
     site_url = site.get("site_url", "")
 
     if "荆门" in site_name:
-        # 荆门新闻使用特定解析器
         from crawlers.cloak_browser import CloakBrowser
         all_items = []
         page_num = 0
@@ -71,7 +66,6 @@ async def search(browser, site: dict, keyword: str, keep_days: int, search_url: 
                 await CloakBrowser.human_delay(1.0, 2.0)
         return all_items
 
-    # 其他湖北网站使用通用翻页
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,
     )

@@ -23,33 +23,7 @@ else:
     load_dotenv(override=False)
 
 # ============================================================
-# 项目路径
-# ============================================================
-PROJECT_ROOT = _PROJECT_ROOT
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR = PROJECT_ROOT / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# ============================================================
-# 搜索关键词 (创新平台相关)
-# ============================================================
-SEARCH_KEYWORDS = [
-    "新型研发机构",
-    "实验室",
-    "中试平台",
-    "成果转化",
-    "孵化器",
-    "创新平台",
-    "科学装置",
-    "联合体",
-    "技术经理人",
-    "服务平台",
-    "研究院",
-]
-
-# ============================================================
-# 辅助函数
+# 辅助函数 (必须在环境变量配置之前定义)
 # ============================================================
 
 def _env(key: str, default: str = "") -> str:
@@ -74,6 +48,64 @@ def _env_bool(key: str, default: bool = True) -> bool:
 def _env_optional(key: str, default: Optional[str] = None) -> Optional[str]:
     val = os.getenv(key)
     return val if val else default
+
+# ============================================================
+# 搜索关键词 (创新平台相关)
+# 支持环境变量 SEARCH_KEYWORDS 覆盖，逗号分隔，如：
+# SEARCH_KEYWORDS=新型研发机构,实验室,中试平台
+# ============================================================
+_DEFAULT_KEYWORDS = "新型研发机构,实验室,中试平台,成果转化,孵化器,创新平台,科学装置,联合体,技术经理人,服务平台,研究院"
+SEARCH_KEYWORDS = [
+    kw.strip()
+    for kw in _env("SEARCH_KEYWORDS", _DEFAULT_KEYWORDS).split(",")
+    if kw.strip()
+]
+
+# ============================================================
+# 随机 User-Agent 池 (支持环境变量覆盖，分号分隔)
+# 环境变量: CRAWLER_USER_AGENTS
+# ============================================================
+_DEFAULT_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+]
+
+_env_ua = _env("CRAWLER_USER_AGENTS", "").strip()
+USER_AGENTS = [ua.strip() for ua in _env_ua.split(";") if ua.strip()] if _env_ua else _DEFAULT_USER_AGENTS
+
+# ============================================================
+# 随机视口尺寸池 (支持环境变量覆盖，逗号分隔，格式: 1920x1080)
+# 环境变量: CRAWLER_VIEWPORTS
+# ============================================================
+_DEFAULT_VIEWPORTS = [
+    {"width": 1920, "height": 1080},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 2560, "height": 1440},
+]
+
+def _parse_viewports(env_str: str) -> list:
+    result = []
+    for item in env_str.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "x" in item:
+            parts = item.lower().split("x")
+            try:
+                result.append({"width": int(parts[0]), "height": int(parts[1])})
+            except (ValueError, IndexError):
+                continue
+    return result
+
+_env_vp = _env("CRAWLER_VIEWPORTS", "").strip()
+VIEWPORTS = _parse_viewports(_env_vp) if _env_vp else _DEFAULT_VIEWPORTS
 
 
 # ============================================================
@@ -153,19 +185,10 @@ class DBConfig:
 class CrawlerConfig:
     """爬虫行为配置 - 从 .env 读取"""
 
-    # --- 目标新闻源 ---
-    NEWS_SEARCH_URLS = [
-        "https://www.baidu.com/s?tn=news&word={keyword}",
-    ]
-
     # --- 浏览器 ---
     HEADLESS: bool = _env_bool("CRAWLER_HEADLESS", False)  # 默认显示浏览器
     STEALTH_MODE: bool = _env_bool("CRAWLER_STEALTH", True)
-    RANDOM_USER_AGENT: bool = True
-    VIEWPORT_WIDTH: int = 1920
-    VIEWPORT_HEIGHT: int = 1080
     PROXY_URL: Optional[str] = _env_optional("CRAWLER_PROXY")
-    REQUEST_TIMEOUT: int = _env_int("CRAWLER_TIMEOUT", 30000)
 
     # --- 人类行为模拟 (模拟真实用户操作) ---
     HUMAN_DELAY_MIN: float = _env_float("HUMAN_DELAY_MIN", 1.0)
@@ -182,9 +205,7 @@ class CrawlerConfig:
     # 只保留最近N天的新闻（1=仅今天，2=今天和昨天，以此类推）
     KEEP_RECENT_DAYS: int = _env_int("KEEP_RECENT_DAYS", 1)
     # 同时爬取的网站并发数（每个网站内部关键词串行）
-    MAX_CONCURRENT_SITES: int = _env_int("MAX_CONCURRENT_SITES", 1)
-    MAX_RETRIES: int = _env_int("MAX_RETRIES", 3)
-    RETRY_DELAY: float = _env_float("RETRY_DELAY", 3.0)
+    MAX_CONCURRENT_SITES: int = _env_int("MAX_CONCURRENT_SITES", 3)
 
     # --- 定时任务 ---
     # 定时爬取时间（24小时制，如 "08:00" 表示每天8点执行）

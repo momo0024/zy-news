@@ -10,12 +10,8 @@
 """
 
 import asyncio
-import sys
 import time
-from pathlib import Path
 from urllib.parse import quote
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from loguru import logger
 from sqlalchemy import text
@@ -26,6 +22,20 @@ from db.init_db import init_database
 from crawlers.cloak_browser import CloakBrowser
 from crawlers.sites import get_search_handler
 from crawlers.sites.common import filter_recent_news, save_news_to_db
+
+# 初始化日志文件输出（直接运行本文件时生效）
+from pathlib import Path as _Path
+_LOG_DIR = _Path(__file__).resolve().parent.parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+logger.add(
+    _LOG_DIR / "crawler_{time:YYYY-MM-DD}.log",
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}",
+    level="DEBUG",
+    rotation="10 MB",
+    retention="7 days",
+    encoding="utf-8",
+    enqueue=True,
+)
 
 
 # ============================================================
