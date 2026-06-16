@@ -12,6 +12,7 @@ SQLAlchemy 是 Python 生态中最流行的数据库工具库，内置 QueuePool
 """
 
 from typing import Optional
+from urllib.parse import quote
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
@@ -27,9 +28,12 @@ from utils.timezone import APP_TZ
 
 
 def _build_async_url(config: DBConfig) -> str:
-    """构建 SQLAlchemy 异步连接 URL"""
+    """构建 SQLAlchemy 异步连接 URL
+    对用户名和密码进行 URL 编码，避免特殊字符（如 @ : / ? # [ ] ! $ & ' ( ) * + , ; =）
+    破坏 URL 解析导致 getaddrinfo failed 等连接错误
+    """
     return (
-        f"postgresql+asyncpg://{config.USER}:{config.PASSWORD}"
+        f"postgresql+asyncpg://{quote(config.USER, safe='')}:{quote(config.PASSWORD, safe='')}"
         f"@{config.HOST}:{config.PORT}/{config.NAME}"
     )
 
