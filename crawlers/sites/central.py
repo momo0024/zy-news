@@ -66,6 +66,54 @@ def _parse_people(html: str, keyword: str, site_name: str, site_url: str) -> lis
     return items
 
 
+def _parse_gmw(html: str, keyword: str, site_name: str, site_url: str) -> list[dict]:
+    """解析光明网搜索（zhonghua.gmw.cn）结果"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+
+    for box in soup.select(".m-news-box"):
+        try:
+            title_el = box.select_one("h3 a")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            href = title_el.get("href", "")
+
+            # 优先使用 u-links 中的真实URL
+            links_el = box.select_one("p.u-links")
+            if links_el:
+                url = links_el.get_text(strip=True)
+            else:
+                url = href if href.startswith("http") else urljoin("https://zhonghua.gmw.cn", href)
+
+            source_time_el = box.select_one("p.u-source")
+            source = site_name
+            pub_time = ""
+            if source_time_el:
+                source_text = source_time_el.get_text(strip=True)
+                time_el = source_time_el.select_one("span.u-time")
+                if time_el:
+                    pub_time = time_el.get_text(strip=True)
+                    source = source_text.replace(pub_time, "").replace("来源：", "").strip()
+                else:
+                    source = source_text
+
+            if title and url:
+                items.append({
+                    "title": title,
+                    "url": url,
+                    "publish_time": pub_time,
+                    "source": source or site_name,
+                    "matched_keyword": keyword,
+                    "site_url": site_url,
+                })
+        except Exception as e:
+            logger.warning(f"解析光明网条目失败: {e}")
+
+    return items
+
+
 def _parse_cctv(html: str, keyword: str, site_name: str, site_url: str) -> list[dict]:
     """解析央视网搜索（search.cctv.com）结果"""
     from bs4 import BeautifulSoup
@@ -298,6 +346,38 @@ async def _search_cctv(
 
 
 # ============================================================
+# 光明网：layui 分页 + JS 动态加载
+# ============================================================
+
+async def _search_gmw(
+    browser: CloakBrowser, search_url: str, keyword: str,
+    site_name: str, site_url: str, keep_days: int,
+) -> list[dict]:
+    async with browser.session() as page:
+        logger.debug(f"[光明网] 导航到搜索页: {search_url[:120]}")
+        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        async def parse_page(page):
+            html = await page.content()
+            return _parse_gmw(html, keyword, site_name, site_url)
+
+        async def click_next(page, page_num):
+            next_btn = page.locator(".layui-laypage-next")
+            if await next_btn.count() > 0:
+                cls = await next_btn.get_attribute("class") or ""
+                if "disabled" in cls or "layui-disabled" in cls:
+                    logger.debug(f"[光明网] 已到最后一页（第{page_num}页）")
+                    return False
+                await next_btn.click()
+                await page.wait_for_timeout(4000)
+                return True
+            return False
+
+        return await pagination_loop(page, browser, site_name, keep_days, parse_page, click_next)
+
+
+# ============================================================
 # 入口
 # ============================================================
 
@@ -314,6 +394,8 @@ async def search(
         return await _search_xinhua(browser, search_url, keyword, site_name, site_url, keep_days)
     if "央视" in site_name or "cctv" in site_url.lower():
         return await _search_cctv(browser, search_url, keyword, site_name, site_url, keep_days)
+    if "光明" in site_name or "gmw" in site_url.lower():
+        return await _search_gmw(browser, search_url, keyword, site_name, site_url, keep_days)
 
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,

@@ -189,9 +189,33 @@ class CloakBrowser:
             "--mute-audio",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-breakpad",
+            "--disable-component-update",
+            "--disable-ipc-flooding-protection",
             f"--window-size={window_width},{window_height}",
             f"--window-position={window_x},{window_y}",
         ]
+
+        # 无头模式下使用新无头模式（更难被检测）并追加反检测参数
+        launch_headless = self.headless
+        if self.headless:
+            launch_args.extend([
+                "--headless=new",
+                "--hide-scrollbars",
+                "--disable-gpu",
+            ])
+            # Playwright 1.40+ 可直接传字符串
+            try:
+                import playwright
+                from packaging import version
+                if version.parse(playwright.__version__) >= version.parse("1.40.0"):
+                    launch_headless = "new"
+            except Exception:
+                pass
 
         # 非无头模式下去掉一些可能影响体验的参数
         if not self.headless:
@@ -204,7 +228,7 @@ class CloakBrowser:
 
         try:
             self._browser = await self._playwright.chromium.launch(
-                headless=self.headless,
+                headless=launch_headless,
                 args=launch_args,
                 slow_mo=random.randint(30, 80) if not self.headless else 0,  # 操作间微量延迟
             )
@@ -246,19 +270,140 @@ class CloakBrowser:
                 logger.warning("playwright-stealth 未安装，将使用内置隐匿")
                 await self._inject_stealth_scripts()
 
+        # 无头模式下补充 outerWidth/Height 和 screen 模拟
+        if self.headless:
+            await self._context.add_init_script("""
+                const vw = window.innerWidth;
+                const vh = window.innerHeight;
+                const chromeH = 130;  // 标题栏+地址栏+标签栏估算
+                const chromeW = 16;   // 左右边框
+                Object.defineProperty(window, 'outerWidth', { get: () => vw + chromeW });
+                Object.defineProperty(window, 'outerHeight', { get: () => vh + chromeH });
+                Object.defineProperty(window.screen, 'availWidth', { get: () => vw + chromeW });
+                Object.defineProperty(window.screen, 'availHeight', { get: () => vh + chromeH + 40 });
+                Object.defineProperty(window.screen, 'width', { get: () => vw + chromeW + 20 });
+                Object.defineProperty(window.screen, 'height', { get: () => vh + chromeH + 60 });
+                Object.defineProperty(window.screen, 'availLeft', { get: () => 0 });
+                Object.defineProperty(window.screen, 'availTop', { get: () => 0 });
+                Object.defineProperty(window.screen, 'colorDepth', { get: () => 24 });
+                Object.defineProperty(window.screen, 'pixelDepth', { get: () => 24 });
+            """)
+
         return self._context
 
     async def _inject_stealth_scripts(self):
-        """内置隐匿脚本"""
+        """内置隐匿脚本 - 覆盖无头浏览器常见检测点"""
         stealth_js = """
+        // 1. 删除 webdriver 标志
+        delete Object.getPrototypeOf(navigator).webdriver;
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+
+        // 2. 模拟 chrome 对象
+        window.chrome = window.chrome || {};
+        window.chrome.runtime = {
+            OnInstalledReason: {CHROME_UPDATE: "chrome_update", EXTENSION_UPDATE: "extension_update", INSTALL: "install", SHARED_MODULE_UPDATE: "shared_module_update", UPDATE: "update"},
+            OnRestartRequiredReason: {APP_UPDATE: "app_update", OS_UPDATE: "os_update", PERIODIC: "periodic"},
+            PlatformArch: {ARM: "arm", ARM64: "arm64", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", X86_32: "x86-32", X86_64: "x86-64"},
+            PlatformNaclArch: {ARM: "arm", MIPS: "mips", MIPS64: "mips64", MIPS64EL: "mips64el", MIPSEL: "mipsel", MIPS_EL: "mipsel", X86_32: "x86-32", X86_64: "x86-64"},
+            PlatformOs: {ANDROID: "android", CROS: "cros", LINUX: "linux", MAC: "mac", OPENBSD: "openbsd", WIN: "win"},
+            RequestUpdateCheckStatus: {NO_UPDATE: "no_update", THROTTLED: "throttled", UPDATE_AVAILABLE: "update_available"},
+            connect: function() { return {postMessage: function() {}, disconnect: function() {}, onMessage: {addListener: function() {}, removeListener: function() {}}, onDisconnect: {addListener: function() {}, removeListener: function() {}}} },
+            sendMessage: function() {},
+            onMessage: {addListener: function() {}, removeListener: function() {}, hasListener: function() { return false; }},
+            onConnect: {addListener: function() {}, removeListener: function() {}, hasListener: function() { return false; }},
+            loadTimes: function() { return {} },
+            csi: function() { return {} },
+            app: {isInstalled: false, InstallState: {DISABLED: "disabled", INSTALLED: "installed", NOT_INSTALLED: "not_installed"}, RunningState: {CANNOT_RUN: "cannot_run", READY_TO_RUN: "ready_to_run", RUNNING: "running"}}
+        };
+
+        // 3. 模拟 plugins 和 mimeTypes
+        const makeFakePlugin = (name, filename, description, version) => ({
+            name, filename, description, version,
+            length: 1,
+            item: function() { return this[0]; },
+            namedItem: function() { return this[0]; },
+            [0]: {description: description, suffixes: "pdf", type: "application/pdf", enabledPlugin: this}
+        });
+        const fakePlugins = [
+            makeFakePlugin("Chrome PDF Plugin", "internal-pdf-viewer", "Portable Document Format", "undefined"),
+            makeFakePlugin("Chrome PDF Viewer", "mhjfbmdgcfjbbpaeojofohoefgiehjai", "Portable Document Format", "undefined"),
+            makeFakePlugin("Native Client", "internal-nacl-plugin", "Native Client module"),
+        ];
+        Object.setPrototypeOf(fakePlugins, PluginArray.prototype);
+        fakePlugins.length = fakePlugins.length;
+        fakePlugins.item = function(idx) { return this[idx] || null; };
+        fakePlugins.namedItem = function(name) { return this.find(p => p.name === name) || null; };
+        fakePlugins.refresh = function() {};
+        Object.defineProperty(navigator, 'plugins', { get: () => fakePlugins });
+
+        const fakeMimeTypes = [
+            {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: fakePlugins[1]},
+            {type: "application/x-google-chrome-pdf", suffixes: "pdf", description: "Portable Document Format", enabledPlugin: fakePlugins[1]},
+            {type: "application/x-nacl", suffixes: "", description: "Native Client executable", enabledPlugin: fakePlugins[2]},
+            {type: "application/x-pnacl", suffixes: "", description: "Portable Native Client executable", enabledPlugin: fakePlugins[2]},
+        ];
+        Object.setPrototypeOf(fakeMimeTypes, MimeTypeArray.prototype);
+        fakeMimeTypes.length = fakeMimeTypes.length;
+        fakeMimeTypes.item = function(idx) { return this[idx] || null; };
+        fakeMimeTypes.namedItem = function(name) { return this.find(m => m.type === name) || null; };
+        fakeMimeTypes.refresh = function() {};
+        Object.defineProperty(navigator, 'mimeTypes', { get: () => fakeMimeTypes });
+
+        // 4. 模拟 languages
         Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-        window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
+
+        // 5. 模拟硬件信息
+        Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+        Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+        Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+
+        // 6. 覆盖 Permissions.query
         const oq = window.navigator.permissions.query;
-        window.navigator.permissions.query = (p) => (
-            p.name === 'notifications' ? Promise.resolve({state: Notification.permission}) : oq(p)
-        );
+        window.navigator.permissions.query = (p) => {
+            if (p.name === 'notifications') {
+                return Promise.resolve({state: Notification.permission, onchange: null});
+            }
+            return oq(p);
+        };
+
+        // 7. 模拟 Notification.permission
+        if (Notification.permission === 'default') {
+            Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+        }
+
+        // 8. 覆盖 canvas fingerprint (基础)
+        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {
+            if (type === 'image/png' && this.width > 100 && this.height > 100) {
+                // 添加微小噪声
+                const ctx = this.getContext('2d');
+                if (ctx) {
+                    const imageData = ctx.getImageData(0, 0, this.width, this.height);
+                    const data = imageData.data;
+                    data[0] = data[0] ^ 1;
+                    ctx.putImageData(imageData, 0, 0);
+                }
+            }
+            return origToDataURL.apply(this, arguments);
+        };
+
+        // 9. 覆盖 WebGL vendor / renderer
+        const getParameterProxyHandler = {
+            apply: function(target, thisArg, args) {
+                const param = args[0];
+                if (param === 37445) return 'Intel Inc.';      // UNMASKED_VENDOR_WEBGL
+                if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+                return target.apply(thisArg, args);
+            }
+        };
+        if (window.WebGLRenderingContext) {
+            const origGetParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = new Proxy(origGetParameter, getParameterProxyHandler);
+        }
+        if (window.WebGL2RenderingContext) {
+            const origGetParameter2 = WebGL2RenderingContext.prototype.getParameter;
+            WebGL2RenderingContext.prototype.getParameter = new Proxy(origGetParameter2, getParameterProxyHandler);
+        }
         """
         self._browser.on("page", lambda page: page.add_init_script(stealth_js))
 
