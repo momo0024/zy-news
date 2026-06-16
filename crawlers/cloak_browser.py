@@ -12,6 +12,7 @@ CloakBrowser - 高隐匿浏览器封装
 
 import asyncio
 import ctypes
+import os
 import random
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncIterator
@@ -162,7 +163,28 @@ class CloakBrowser:
             logger.error("playwright 未安装，请执行: pip install playwright && playwright install chromium")
             raise
 
+        # 清除系统代理环境变量，避免 Playwright Chromium 继承全局代理
+        # （如 mihomo/clash 等）导致国内网站 ERR_EMPTY_RESPONSE
+        _proxy_vars = [
+            "http_proxy", "https_proxy", "all_proxy",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+            "ftp_proxy", "FTP_PROXY", "no_proxy", "NO_PROXY",
+        ]
+        _cleared = []
+        for _var in _proxy_vars:
+            val = os.environ.pop(_var, None)
+            if val is not None:
+                _cleared.append((_var, val))
+        if _cleared:
+            logger.debug(f"已临时清除 {len(_cleared)} 个代理环境变量")
+
         self._playwright = await async_playwright().start()
+
+        # 恢复代理环境变量（不影响 Playwright 子进程，因为已经启动）
+        for _var, _val in _cleared:
+            os.environ[_var] = _val
+        if _cleared:
+            logger.debug(f"已恢复 {len(_cleared)} 个代理环境变量")
 
         # 浏览器边框+工具栏的估算开销（Windows Chrome）
         # 左右边框约 16px，标题栏+地址栏+标签栏约 130px

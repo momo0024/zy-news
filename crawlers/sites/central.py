@@ -192,7 +192,8 @@ async def _search_people(
 ) -> list[dict]:
     async with browser.session() as page:
         logger.debug(f"[人民网] 导航到搜索页: {search_url[:120]}")
-        await page.goto(search_url, wait_until="networkidle", timeout=30000)
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)
 
         # 勾选精确匹配
         try:
