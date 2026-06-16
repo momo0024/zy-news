@@ -226,9 +226,15 @@ async def pagination_loop(
 
     while page_num < max_pages:
         page_num += 1
-        await browser.human_delay(0.5, 1.5)
-        await browser.human_mouse_move(page)
-        await browser.human_scroll(page)
+
+        # 无头模式下简化人工操作（反爬主要靠浏览器指纹而非行为）
+        if browser.headless:
+            await browser.human_delay(0.3, 0.8)
+            await browser.human_scroll(page, headless=True)
+        else:
+            await browser.human_delay(0.5, 1.5)
+            await browser.human_mouse_move(page)
+            await browser.human_scroll(page)
 
         page_items = await parse_page_func(page)
         if not page_items:

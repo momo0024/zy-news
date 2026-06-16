@@ -94,12 +94,13 @@ class CloakBrowser:
             pass  # 非关键，静默忽略
 
     @staticmethod
-    async def human_scroll(page):
+    async def human_scroll(page, headless: bool = False):
         """
         模拟人类自然滚动行为:
         - 分多次缓慢滚动到底部
         - 中途随机暂停 (模拟阅读)
         - 不再滚回顶部（留在底部确保内容完整加载）
+        - 无头模式下简化为单次快速滚动，大幅节省耗时
         """
         if not CrawlerConfig.HUMAN_RANDOM_SCROLL:
             return
@@ -110,6 +111,12 @@ class CloakBrowser:
 
             if scroll_height <= viewport_height * 1.2:
                 return  # 页面太短不需要滚动
+
+            if headless:
+                # 无头模式：单次快速滚动到底部，无停顿
+                await page.evaluate("window.scrollTo({top: document.body.scrollHeight, behavior: 'auto'})")
+                await asyncio.sleep(0.3)
+                return
 
             # 分 3-5 段滚动到底部
             segments = random.randint(3, 5)
@@ -200,22 +207,12 @@ class CloakBrowser:
             f"--window-position={window_x},{window_y}",
         ]
 
-        # 无头模式下使用新无头模式（更难被检测）并追加反检测参数
-        launch_headless = self.headless
+        # 无头模式下追加反检测参数
         if self.headless:
             launch_args.extend([
-                "--headless=new",
                 "--hide-scrollbars",
                 "--disable-gpu",
             ])
-            # Playwright 1.40+ 可直接传字符串
-            try:
-                import playwright
-                from packaging import version
-                if version.parse(playwright.__version__) >= version.parse("1.40.0"):
-                    launch_headless = "new"
-            except Exception:
-                pass
 
         # 非无头模式下去掉一些可能影响体验的参数
         if not self.headless:
@@ -228,7 +225,7 @@ class CloakBrowser:
 
         try:
             self._browser = await self._playwright.chromium.launch(
-                headless=launch_headless,
+                headless=self.headless,
                 args=launch_args,
                 slow_mo=random.randint(30, 80) if not self.headless else 0,  # 操作间微量延迟
             )
