@@ -192,7 +192,7 @@ class CrawlerConfig:
 
     # --- 人类行为模拟 (模拟真实用户操作) ---
     HUMAN_DELAY_MIN: float = _env_float("HUMAN_DELAY_MIN", 1.0)
-    HUMAN_DELAY_MAX: float = _env_float("HUMAN_DELAY_MAX", 4.0)
+    HUMAN_DELAY_MAX: float = _env_float("HUMAN_DELAY_MAX", 3.0)
     KEYWORD_DELAY_MIN: float = _env_float("KEYWORD_DELAY_MIN", 5.0)
     KEYWORD_DELAY_MAX: float = _env_float("KEYWORD_DELAY_MAX", 10.0)
     HUMAN_MOUSE_MOVE: bool = _env_bool("HUMAN_MOUSE_MOVE", True)
@@ -208,8 +208,12 @@ class CrawlerConfig:
     MAX_CONCURRENT_SITES: int = _env_int("MAX_CONCURRENT_SITES", 3)
 
     # --- 定时任务 ---
-    # 定时爬取时间（24小时制，如 "08:00" 表示每天8点执行）
-    CRAWL_SCHEDULE_TIME: str = _env("CRAWL_SCHEDULE_TIME", "08:00")
+    # 定时爬取时间（24小时制，多个时间用逗号分隔，如 "08:00,15:00"）
+    CRAWL_SCHEDULE_TIMES: list[str] = [
+        t.strip()
+        for t in _env("CRAWL_SCHEDULE_TIMES", "08:00,15:00").split(",")
+        if t.strip()
+    ]
 
 
 # ============================================================

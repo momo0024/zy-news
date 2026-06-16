@@ -65,7 +65,7 @@ def parse_args():
 
     parser.add_argument(
         "--api", action="store_true",
-        help="只启动 FastAPI 服务 (默认端口 8000)",
+        help="只启动 FastAPI 服务 (默认端口 8066)",
     )
 
     parser.add_argument(
@@ -74,8 +74,8 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--api-port", type=int, default=8000,
-        help="API 服务端口 (默认: 8000)",
+        "--api-port", type=int, default=8066,
+        help="API 服务端口 (默认: 8066)",
     )
 
     parser.add_argument(
@@ -121,8 +121,8 @@ async def _start_scheduler():
     from db.init_db import init_database
     await init_database()
 
-    schedule_time = CrawlerConfig.CRAWL_SCHEDULE_TIME
-    logger.info(f"定时爬取模式启动，每天 {schedule_time} 执行")
+    schedule_times = CrawlerConfig.CRAWL_SCHEDULE_TIMES
+    logger.info(f"定时爬取模式启动，每天 {', '.join(schedule_times)} 执行")
 
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -131,17 +131,21 @@ async def _start_scheduler():
         logger.error("apscheduler 未安装，请执行: pip install apscheduler")
         raise
 
-    hour, minute = schedule_time.split(":")
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        crawl_all_sites,
-        CronTrigger(hour=int(hour), minute=int(minute)),
-        id="daily_crawl",
-        name="每日新闻爬取",
-        misfire_grace_time=3600,
-    )
+    for idx, time_str in enumerate(schedule_times):
+        try:
+            hour, minute = time_str.split(":")
+            scheduler.add_job(
+                crawl_all_sites,
+                CronTrigger(hour=int(hour), minute=int(minute)),
+                id=f"daily_crawl_{idx}",
+                name=f"每日新闻爬取-{time_str}",
+                misfire_grace_time=3600,
+            )
+            logger.info(f"定时任务已注册: 每天 {time_str} 执行爬取")
+        except ValueError:
+            logger.warning(f"定时时间格式错误，已跳过: {time_str}")
     scheduler.start()
-    logger.info(f"定时任务已注册: 每天 {schedule_time} 执行爬取")
 
     # 保持运行
     try:
@@ -199,7 +203,7 @@ async def main():
     logger.info("zy-news 新闻爬虫系统")
     logger.info("默认模式：同时启动 API 服务 + 定时爬取任务")
     logger.info(f"API 地址: http://{args.api_host}:{args.api_port}")
-    logger.info(f"定时任务: 每天 {CrawlerConfig.CRAWL_SCHEDULE_TIME} 执行")
+    logger.info(f"定时任务: 每天 {', '.join(CrawlerConfig.CRAWL_SCHEDULE_TIMES)} 执行")
     logger.info("=" * 60)
 
     # 先初始化数据库

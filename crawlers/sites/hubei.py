@@ -6,6 +6,8 @@
 from loguru import logger
 
 from crawlers.sites.common import (
+    all_items_are_recent,
+    filter_recent_news,
     parse_generic_search_results,
     search_generic_with_pagination,
 )
@@ -63,8 +65,14 @@ async def search(browser, site: dict, keyword: str, keep_days: int, search_url: 
                 if not page_items:
                     break
                 all_items.extend(page_items)
+
+                if not all_items_are_recent(page_items, keep_days):
+                    logger.info(f"[{site_name}] 第{page_num}页已混入非近{keep_days}天新闻，停止翻页")
+                    break
+
                 await CloakBrowser.human_delay(1.0, 2.0)
-        return all_items
+
+        return filter_recent_news(all_items, keep_days)
 
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,

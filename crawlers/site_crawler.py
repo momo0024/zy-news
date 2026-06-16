@@ -119,8 +119,8 @@ async def crawl_site(site: dict, keywords: list[str], browser: CloakBrowser) -> 
             # 关键词间延迟
             if i < len(keywords) - 1:
                 if "人民" in site_name or "people" in site_url.lower():
-                    logger.debug(f"[{site_name}] 遵守爬虫协议，等待 10s...")
-                    await asyncio.sleep(10)
+                    logger.debug(f"[{site_name}] 遵守爬虫协议，等待 6s...")
+                    await asyncio.sleep(6)
                 else:
                     await CloakBrowser.human_delay(2.0, 4.0)
 

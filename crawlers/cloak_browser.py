@@ -11,6 +11,7 @@ CloakBrowser - 高隐匿浏览器封装
 """
 
 import asyncio
+import ctypes
 import random
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncIterator
@@ -156,6 +157,23 @@ class CloakBrowser:
 
         self._playwright = await async_playwright().start()
 
+        # 浏览器边框+工具栏的估算开销（Windows Chrome）
+        # 左右边框约 16px，标题栏+地址栏+标签栏约 130px
+        chrome_border_w = 16
+        chrome_border_h = 130
+        window_width = self.viewport["width"] + chrome_border_w
+        window_height = self.viewport["height"] + chrome_border_h
+
+        # 窗口在屏幕居中
+        try:
+            screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+            screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+            window_x = max(0, (screen_w - window_width) // 2)
+            window_y = max(0, (screen_h - window_height) // 2)
+        except Exception:
+            window_x = 100
+            window_y = 100
+
         launch_args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
@@ -171,7 +189,8 @@ class CloakBrowser:
             "--mute-audio",
             "--no-first-run",
             "--no-default-browser-check",
-            f"--window-size={self.viewport['width']},{self.viewport['height']}",
+            f"--window-size={window_width},{window_height}",
+            f"--window-position={window_x},{window_y}",
         ]
 
         # 非无头模式下去掉一些可能影响体验的参数
