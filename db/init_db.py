@@ -21,7 +21,7 @@ NEWS_SITES = [
     # ===== 中央级 =====
     {"site_name": "人民日报（人民网）", "site_url": "https://www.people.com.cn", "search_url_template": "https://www.people.com.cn", "search_url": "http://search.people.cn/s?keyword={keyword}&st=0&_={timestamp}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 10},
     {"site_name": "新华社（新华网）", "site_url": "https://www.xinhuanet.com", "search_url_template": "https://so.news.cn", "search_url": "https://so.news.cn/#search/0/{keyword}/1/0", "category": "中央级", "media_type": "通讯社/网站", "supervisor": "国务院", "sort_order": 11},
-    {"site_name": "中央广播电视总台（央视网）", "site_url": "https://www.cctv.com", "search_url_template": "https://search.cctv.com", "search_url": "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=1&channel=&vtime=-1&is_search=1", "category": "中央级", "media_type": "电视台/网站", "supervisor": "中共中央", "sort_order": 12},
+    {"site_name": "中央广播电视总台（央视网）", "site_url": "https://www.cctv.com", "search_url_template": "https://search.cctv.com", "search_url": "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=3&channel=&vtime=-1&is_search=1", "category": "中央级", "media_type": "电视台/网站", "supervisor": "中共中央", "sort_order": 12},
     {"site_name": "求是（求是网）", "site_url": "http://www.qstheory.cn", "search_url_template": "http://www.qstheory.cn", "category": "中央级", "media_type": "期刊/网站", "supervisor": "中共中央", "sort_order": 13},
     {"site_name": "光明日报（光明网）", "site_url": "https://www.gmw.cn", "search_url_template": "https://zhonghua.gmw.cn/news.htm", "search_url": "https://zhonghua.gmw.cn/news.htm?q={keyword}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 14},
     {"site_name": "经济日报（中国经济网）", "site_url": "http://www.ce.cn", "search_url_template": "http://www.ce.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "国务院", "sort_order": 15},
@@ -403,7 +403,7 @@ async def _migrate_to_v5(conn):
 async def _migrate_to_v6(conn):
     """迁移到版本 6：更新央视网搜索URL"""
     try:
-        cctv_search_url = "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=1&channel=&vtime=-1&is_search=1"
+        cctv_search_url = "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=3&channel=&vtime=-1&is_search=1"
         await conn.execute(text(
             "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, updated_at = NOW() WHERE site_name = '中央广播电视总台（央视网）'"
         ), dict(url=cctv_search_url, template="https://search.cctv.com"))

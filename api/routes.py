@@ -15,8 +15,8 @@ from utils.timezone import APP_TZ, format_app_datetime
 
 router = APIRouter(tags=["news"])
 
-DEFAULT_PAGE_SIZE = 20
-MAX_PAGE_SIZE = 100
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
 
 
 @router.get("/news/list")
