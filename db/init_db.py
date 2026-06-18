@@ -22,7 +22,7 @@ NEWS_SITES = [
     {"site_name": "人民日报（人民网）", "site_url": "https://www.people.com.cn", "search_url_template": "https://www.people.com.cn", "search_url": "http://search.people.cn/s?keyword={keyword}&st=0&_={timestamp}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 10},
     {"site_name": "新华社（新华网）", "site_url": "https://www.xinhuanet.com", "search_url_template": "https://so.news.cn", "search_url": "https://so.news.cn/#search/0/{keyword}/1/0", "category": "中央级", "media_type": "通讯社/网站", "supervisor": "国务院", "sort_order": 11},
     {"site_name": "中央广播电视总台（央视网）", "site_url": "https://www.cctv.com", "search_url_template": "https://search.cctv.com", "search_url": "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=3&channel=&vtime=-1&is_search=1", "category": "中央级", "media_type": "电视台/网站", "supervisor": "中共中央", "sort_order": 12},
-    {"site_name": "求是（求是网）", "site_url": "http://www.qstheory.cn", "search_url_template": "http://www.qstheory.cn", "category": "中央级", "media_type": "期刊/网站", "supervisor": "中共中央", "sort_order": 13},
+    {"site_name": "求是（求是网）", "site_url": "https://www.qstheory.cn", "search_url_template": "https://search.qstheory.cn/qiushi/", "search_url": "https://search.qstheory.cn/qiushi/?keyword={keyword}&channelid=269025", "category": "中央级", "media_type": "期刊/网站", "supervisor": "中共中央", "sort_order": 13},
     {"site_name": "光明日报（光明网）", "site_url": "https://www.gmw.cn", "search_url_template": "https://zhonghua.gmw.cn/news.htm", "search_url": "https://zhonghua.gmw.cn/news.htm?q={keyword}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 14},
     {"site_name": "经济日报（中国经济网）", "site_url": "http://www.ce.cn", "search_url_template": "http://www.ce.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "国务院", "sort_order": 15},
     {"site_name": "中国日报（中国日报网）", "site_url": "https://cn.chinadaily.com.cn", "search_url_template": "https://cn.chinadaily.com.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 16},
@@ -178,135 +178,39 @@ async def init_database(engine: AsyncEngine = None) -> None:
             await _insert_default_sites(conn, DEFAULT_CRAWL_SITES, skip_empty_check=False)
             # 插入所有新闻网站数据
             await _insert_news_sites(conn, NEWS_SITES)
-
             # 插入默认关键词
             await _insert_default_keywords(conn)
 
             await conn.execute(text(
                 "INSERT INTO schema_version (version, description) VALUES (1, '初始建表 + 默认数据')"
             ))
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (2, '新增category/media_type/supervisor字段 + 新闻网站数据')"
-            ))
-            # v3: 添加 search_url 字段
-            await _migrate_to_v3(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (3, '新增search_url字段 + 荆门新闻网检索URL')"
-            ))
-            # v4: 人民网检索URL
-            await _migrate_to_v4(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (4, '人民网检索URL配置')"
-            ))
-            # v5: 新华社搜索URL
-            await _migrate_to_v5(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (5, '新华社搜索URL配置')"
-            ))
-            # v6: 央视网搜索URL
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 数据库初始化完成 (version=6)")
 
-        elif current_version == 1:
-            # ---- 迁移到版本 2+3+4+5+6 ----
-            logger.info("[DB Init] 检测到 version=1，开始迁移到最新版本...")
+            # 顺序执行所有注册迁移
+            for ver, desc, migrate_fn, extra_fn in MIGRATIONS:
+                await migrate_fn(conn)
+                if extra_fn:
+                    await extra_fn(conn, NEWS_SITES)
+                await conn.execute(text(
+                    "INSERT INTO schema_version (version, description) VALUES (:ver, :desc)"
+                ), dict(ver=ver, desc=desc))
 
-            # 添加新列 (使用 IF NOT EXISTS 避免重复执行)
-            await _migrate_to_v2(conn)
+            logger.info(f"[DB Init] 数据库初始化完成 (version={MIGRATIONS[-1][0]})")
 
-            # 插入所有新闻网站数据 (已存在的跳过)
-            await _insert_news_sites(conn, NEWS_SITES)
+        elif current_version < MIGRATIONS[-1][0]:
+            # ---- 增量迁移 ----
+            logger.info(f"[DB Init] 检测到 version={current_version}，开始迁移到最新版本...")
 
-            # 继续迁移到 v3
-            await _migrate_to_v3(conn)
+            for ver, desc, migrate_fn, extra_fn in MIGRATIONS:
+                if ver <= current_version:
+                    continue
+                await migrate_fn(conn)
+                if extra_fn:
+                    await extra_fn(conn, NEWS_SITES)
+                await conn.execute(text(
+                    "INSERT INTO schema_version (version, description) VALUES (:ver, :desc)"
+                ), dict(ver=ver, desc=desc))
 
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (2, '新增category/media_type/supervisor字段 + 新闻网站数据')"
-            ))
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (3, '新增search_url字段 + 荆门新闻网检索URL')"
-            ))
-            # 迁移到 v4
-            await _migrate_to_v4(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (4, '人民网检索URL配置')"
-            ))
-            # 迁移到 v5
-            await _migrate_to_v5(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (5, '新华社搜索URL配置')"
-            ))
-            # 迁移到 v6
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 迁移到 version=6 完成")
-
-        elif current_version == 2:
-            logger.info("[DB Init] 检测到 version=2，开始迁移到最新版本...")
-            await _migrate_to_v3(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (3, '新增search_url字段 + 荆门新闻网检索URL')"
-            ))
-            # 迁移到 v4
-            await _migrate_to_v4(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (4, '人民网检索URL配置')"
-            ))
-            # 迁移到 v5
-            await _migrate_to_v5(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (5, '新华社搜索URL配置')"
-            ))
-            # 迁移到 v6
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 迁移到 version=6 完成")
-
-        elif current_version == 3:
-            logger.info("[DB Init] 检测到 version=3，开始迁移到最新版本...")
-            await _migrate_to_v4(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (4, '人民网检索URL配置')"
-            ))
-            # 迁移到 v5
-            await _migrate_to_v5(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (5, '新华社搜索URL配置')"
-            ))
-            # 迁移到 v6
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 迁移到 version=6 完成")
-
-        elif current_version == 4:
-            logger.info("[DB Init] 检测到 version=4，开始迁移到 version=6...")
-            await _migrate_to_v5(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (5, '新华社搜索URL配置')"
-            ))
-            # 迁移到 v6
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 迁移到 version=6 完成")
-
-        elif current_version == 5:
-            logger.info("[DB Init] 检测到 version=5，开始迁移到 version=6...")
-            await _migrate_to_v6(conn)
-            await conn.execute(text(
-                "INSERT INTO schema_version (version, description) VALUES (6, '央视网搜索URL配置')"
-            ))
-            logger.info("[DB Init] 迁移到 version=6 完成")
+            logger.info(f"[DB Init] 迁移到 version={MIGRATIONS[-1][0]} 完成")
 
         else:
             logger.info(f"[DB Init] 数据库已初始化 (version={current_version})，跳过")
@@ -412,6 +316,30 @@ async def _migrate_to_v6(conn):
         logger.warning(f"[DB Init] 更新央视网搜索URL时出现警告: {e}")
 
 
+async def _migrate_to_v7(conn):
+    """迁移到版本 7：更新光明日报搜索URL"""
+    try:
+        gmw_search_url = "https://zhonghua.gmw.cn/news.htm?q={keyword}"
+        await conn.execute(text(
+            "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, updated_at = NOW() WHERE site_name = '光明日报（光明网）'"
+        ), dict(url=gmw_search_url, template="https://zhonghua.gmw.cn/news.htm"))
+        logger.info("[DB Init] 光明日报搜索URL已更新到 v7")
+    except Exception as e:
+        logger.warning(f"[DB Init] 更新光明日报搜索URL时出现警告: {e}")
+
+
+async def _migrate_to_v8(conn):
+    """迁移到版本 8：更新求是网搜索URL"""
+    try:
+        qiushi_search_url = "https://search.qstheory.cn/qiushi/?keyword={keyword}&channelid=269025"
+        await conn.execute(text(
+            "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, site_url = 'https://www.qstheory.cn', updated_at = NOW() WHERE site_name = '求是（求是网）'"
+        ), dict(url=qiushi_search_url, template="https://search.qstheory.cn/qiushi/"))
+        logger.info("[DB Init] 求是网搜索URL已更新到 v8")
+    except Exception as e:
+        logger.warning(f"[DB Init] 更新求是网搜索URL时出现警告: {e}")
+
+
 async def _insert_default_sites(conn, sites, skip_empty_check: bool = True):
     """插入默认网站配置"""
     if skip_empty_check:
@@ -471,6 +399,20 @@ async def _insert_news_sites(conn, sites):
             logger.warning(f"[DB Init] 插入网站 {site['site_name']} 失败: {e}")
 
     logger.info(f"[DB Init] 已插入 {inserted} 条新闻网站数据")
+
+
+# 迁移注册表: [(version, description, migrate_fn, extra_fn)]
+# extra_fn 为 None 或额外需要执行的函数（如 v2 需同时插入新闻网站）
+# 注意：必须放在所有迁移函数定义之后
+MIGRATIONS = [
+    (2, "新增category/media_type/supervisor字段 + 新闻网站数据", _migrate_to_v2, _insert_news_sites),
+    (3, "新增search_url字段 + 荆门新闻网检索URL", _migrate_to_v3, None),
+    (4, "人民网检索URL配置", _migrate_to_v4, None),
+    (5, "新华社搜索URL配置", _migrate_to_v5, None),
+    (6, "央视网搜索URL配置", _migrate_to_v6, None),
+    (7, "光明日报搜索URL配置", _migrate_to_v7, None),
+    (8, "求是网搜索URL配置", _migrate_to_v8, None),
+]
 
 
 async def _insert_default_keywords(conn):

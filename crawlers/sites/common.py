@@ -121,7 +121,14 @@ def _parse_item_date(item: dict) -> datetime | None:
     pub_time = item.get("publish_time", "")
     if not pub_time:
         return None
-    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+    ]:
         try:
             return datetime.strptime(str(pub_time).strip(), fmt)
         except ValueError:

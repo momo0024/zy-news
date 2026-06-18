@@ -182,6 +182,47 @@ def _parse_cctv(html: str, keyword: str, site_name: str, site_url: str) -> list[
     return items
 
 
+def _parse_qiushi(html: str, keyword: str, site_name: str, site_url: str) -> list[dict]:
+    """解析求是网搜索（search.qstheory.cn/qiushi/）结果"""
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+
+    for item in soup.select(".search-content-list .search-content-item"):
+        try:
+            title_el = item.select_one("p.search-title a")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            url = title_el.get("href", "")
+            if url and not url.startswith("http"):
+                url = urljoin("http://www.qstheory.cn", url)
+
+            info_spans = item.select(".search-content-info span")
+            source = site_name
+            pub_time = ""
+            for span in info_spans:
+                text = span.get_text(strip=True)
+                if text.startswith("来源："):
+                    source = text[3:].strip() or site_name
+                elif text.startswith("时间："):
+                    pub_time = text[3:].strip()
+
+            if title and url:
+                items.append({
+                    "title": title,
+                    "url": url,
+                    "publish_time": pub_time,
+                    "source": source,
+                    "matched_keyword": keyword,
+                    "site_url": site_url,
+                })
+        except Exception as e:
+            logger.warning(f"解析求是网条目失败: {e}")
+
+    return items
+
+
 # ============================================================
 # 人民网：精确匹配 + 日期感知翻页
 # ============================================================
@@ -379,6 +420,86 @@ async def _search_gmw(
 
 
 # ============================================================
+# 求是网：固定搜索URL + JS动态筛选 + AJAX翻页
+# ============================================================
+
+async def _search_qiushi(
+    browser: CloakBrowser, search_url: str, keyword: str,
+    site_name: str, site_url: str, keep_days: int,
+) -> list[dict]:
+    async with browser.session() as page:
+        logger.debug(f"[求是网] 导航到搜索页: {search_url[:120]}")
+
+        # 1. 打开固定搜索页
+        await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(1500)
+
+        # 2. 通过 JS 点击设置筛选条件
+        async def _apply_filter(data_class: str, data_value: str, name: str):
+            selector = f".search-condition[data-class='{data_class}'] li[data-value='{data_value}']"
+            btn = page.locator(selector).first
+            if await btn.count() == 0:
+                logger.warning(f"[求是网] 未找到{name}筛选按钮")
+                return False
+            cls = await btn.get_attribute("class") or ""
+            if "active" in cls:
+                logger.debug(f"[求是网] {name}已是目标值")
+                return True
+            await btn.click()
+            logger.debug(f"[求是网] 已点击{name}")
+            return True
+
+        # 全部来源 ly=1（默认已选中）
+        # 一周内 sj=3
+        await _apply_filter("3", "3", "一周内")
+        # 时间顺序 orderby=1
+        await _apply_filter("4", "1", "时间顺序")
+
+        # 3. 等待 AJAX 结果刷新
+        try:
+            await page.wait_for_selector(".search-content-list .search-content-item", timeout=30000)
+        except Exception:
+            logger.warning("[求是网] 等待搜索结果超时，继续尝试解析当前内容")
+        await page.wait_for_timeout(1500)
+
+        async def parse_page(page):
+            html = await page.content()
+            return _parse_qiushi(html, keyword, site_name, site_url)
+
+        async def click_next(page, page_num):
+            pagination = page.locator("#Pagination")
+            if await pagination.count() == 0:
+                return False
+
+            # 尝试点击当前页码后的下一页数字
+            next_num = page_num + 1
+            next_link = pagination.locator(f"a:has-text('{next_num}')")
+            if await next_link.count() > 0:
+                cls = await next_link.get_attribute("class") or ""
+                if "current" in cls or "disabled" in cls:
+                    return False
+                await next_link.click()
+                await page.wait_for_timeout(3000)
+                return True
+
+            # 没有具体页码时尝试"下一页"类元素
+            next_btn = pagination.locator("a.next, a.jp-next, span.next")
+            if await next_btn.count() > 0:
+                cls = await next_btn.first.get_attribute("class") or ""
+                if "disabled" in cls or "jp-disabled" in cls:
+                    logger.debug(f"[求是网] 已到最后一页（第{page_num}页）")
+                    return False
+                await next_btn.first.click()
+                await page.wait_for_timeout(3000)
+                return True
+
+            logger.debug(f"[求是网] 未找到第{page_num + 1}页入口，停止翻页")
+            return False
+
+        return await pagination_loop(page, browser, site_name, keep_days, parse_page, click_next)
+
+
+# ============================================================
 # 入口
 # ============================================================
 
@@ -397,6 +518,8 @@ async def search(
         return await _search_cctv(browser, search_url, keyword, site_name, site_url, keep_days)
     if "光明" in site_name or "gmw" in site_url.lower():
         return await _search_gmw(browser, search_url, keyword, site_name, site_url, keep_days)
+    if "求是" in site_name or "qstheory" in site_url.lower():
+        return await _search_qiushi(browser, search_url, keyword, site_name, site_url, keep_days)
 
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,
