@@ -103,18 +103,22 @@ async def crawl_site(site: dict, keywords: list[str], browser: CloakBrowser) -> 
                 browser, site, keyword, keep_days, search_url,
             )
 
-            logger.info(f"[{site_name}] 关键词 [{keyword}] 解析到 {len(all_items)} 条")
+            logger.info(f"[{site_name}] 关键词 [{keyword}] 解析到 {len(all_items)} 条（已按时间过滤）")
 
             if not all_items:
                 continue
 
             filtered = filter_recent_news(all_items, keep_days)
-            logger.info(f"[{site_name}] 关键词 [{keyword}] 近 {keep_days} 天: {len(filtered)} 条")
+            logger.info(f"[{site_name}] 关键词 [{keyword}] 二次时间过滤后: {len(filtered)} 条")
 
             if filtered:
                 saved = await save_news_to_db(filtered, site_id)
                 total_saved += saved
-                logger.info(f"[{site_name}] 实际新增 {saved} 条（过滤后 {len(filtered)} 条中）")
+                duplicated = len(filtered) - saved
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] 数据库去重: "
+                    f"新增 {saved} 条, 重复跳过 {duplicated} 条"
+                )
 
             # 关键词间延迟
             if i < len(keywords) - 1:

@@ -526,6 +526,9 @@ async def search(
     if "中国日报" in site_name or "chinadaily" in site_url.lower():
         from crawlers.sites import chinadaily
         return await chinadaily.search(browser, site, keyword, keep_days, search_url)
+    if "中国新闻社" in site_name or "中国新闻网" in site_name or "chinanews" in site_url.lower():
+        from crawlers.sites import chinanews
+        return await chinanews.search(browser, site, keyword, keep_days, search_url)
 
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,

@@ -6,6 +6,7 @@
 from crawlers.sites import (
     central,
     chinadaily,
+    chinanews,
     ministry,
     province,
     special_zone,
@@ -19,6 +20,7 @@ from crawlers.sites import (
 CATEGORY_HANDLERS = {
     "中央级": central,
     "中国日报": chinadaily,
+    "中国新闻社": chinanews,
     "各部委级": ministry,
     "省级": province,
     "经济特区": special_zone,
@@ -35,6 +37,9 @@ CATEGORY_HANDLERS = {
     "鄂州市": hubei,
     "荆门市": hubei,
 }
+
+
+__all__ = ["get_search_handler", "CATEGORY_HANDLERS"]
 
 
 def get_search_handler(category: str):

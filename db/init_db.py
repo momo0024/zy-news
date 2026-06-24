@@ -28,7 +28,7 @@ NEWS_SITES = [
     {"site_name": "中国日报（中国日报网）", "site_url": "https://cn.chinadaily.com.cn", "search_url_template": "https://newssearch.chinadaily.com.cn", "search_url": "https://newssearch.chinadaily.com.cn/cn/search?query={keyword}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 16},
     {"site_name": "科技日报", "site_url": "https://www.stdaily.com", "search_url_template": "https://search.stdaily.com:8888/founder/NewSearchServlet.do", "search_url": "https://search.stdaily.com:8888/founder/NewSearchServlet.do?siteID=1&content={keyword}", "category": "中央级", "media_type": "报纸", "supervisor": "科技部", "sort_order": 17},
     {"site_name": "工人日报（中工网）", "site_url": "http://www.workercn.cn", "search_url_template": "http://www.workercn.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中华全国总工会", "sort_order": 18},
-    {"site_name": "中国新闻社（中国新闻网）", "site_url": "https://www.chinanews.com.cn", "search_url_template": "https://www.chinanews.com.cn", "category": "中央级", "media_type": "通讯社/网站", "supervisor": "国务院侨办", "sort_order": 19},
+    {"site_name": "中国新闻社（中国新闻网）", "site_url": "https://www.chinanews.com.cn", "search_url_template": "https://sou.chinanews.com.cn/search.do", "search_url": "https://sou.chinanews.com.cn/search.do?q={keyword}", "category": "中央级", "media_type": "通讯社/网站", "supervisor": "国务院侨办", "sort_order": 19},
     {"site_name": "法治日报", "site_url": "http://www.legaldaily.com.cn", "search_url_template": "http://www.legaldaily.com.cn", "category": "中央级", "media_type": "报纸", "supervisor": "司法部", "sort_order": 20},
     {"site_name": "人民政协报（人民政协网）", "site_url": "http://www.rmzxb.com.cn", "search_url_template": "http://www.rmzxb.com.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "全国政协办公厅", "sort_order": 21},
     {"site_name": "学习时报", "site_url": "http://www.studytimes.cn", "search_url_template": "http://www.studytimes.cn", "category": "中央级", "media_type": "报纸", "supervisor": "中共中央党校", "sort_order": 22},
@@ -364,6 +364,18 @@ async def _migrate_to_v10(conn):
         logger.warning(f"[DB Init] 更新中国日报搜索URL时出现警告: {e}")
 
 
+async def _migrate_to_v11(conn):
+    """迁移到版本 11：新增中国新闻网搜索URL"""
+    try:
+        chinanews_search_url = "https://sou.chinanews.com.cn/search.do?q={keyword}"
+        await conn.execute(text(
+            "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, updated_at = NOW() WHERE site_name = '中国新闻社（中国新闻网）'"
+        ), dict(url=chinanews_search_url, template="https://sou.chinanews.com.cn/search.do"))
+        logger.info("[DB Init] 中国新闻网搜索URL已更新到 v11")
+    except Exception as e:
+        logger.warning(f"[DB Init] 更新中国新闻网搜索URL时出现警告: {e}")
+
+
 async def _insert_default_sites(conn, sites, skip_empty_check: bool = True):
     """插入默认网站配置"""
     if skip_empty_check:
@@ -438,6 +450,7 @@ MIGRATIONS = [
     (8, "求是网搜索URL配置", _migrate_to_v8, None),
     (9, "科技日报搜索URL配置", _migrate_to_v9, None),
     (10, "中国日报搜索URL配置", _migrate_to_v10, None),
+    (11, "中国新闻网搜索URL配置", _migrate_to_v11, None),
 ]
 
 
