@@ -520,6 +520,12 @@ async def search(
         return await _search_gmw(browser, search_url, keyword, site_name, site_url, keep_days)
     if "求是" in site_name or "qstheory" in site_url.lower():
         return await _search_qiushi(browser, search_url, keyword, site_name, site_url, keep_days)
+    if "科技日报" in site_name or "stdaily" in site_url.lower():
+        from crawlers.sites import stdaily
+        return await stdaily.search(browser, site, keyword, keep_days, search_url)
+    if "中国日报" in site_name or "chinadaily" in site_url.lower():
+        from crawlers.sites import chinadaily
+        return await chinadaily.search(browser, site, keyword, keep_days, search_url)
 
     return await search_generic_with_pagination(
         browser, search_url, keyword, site_name, site_url, keep_days,

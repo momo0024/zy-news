@@ -25,8 +25,8 @@ NEWS_SITES = [
     {"site_name": "求是（求是网）", "site_url": "https://www.qstheory.cn", "search_url_template": "https://search.qstheory.cn/qiushi/", "search_url": "https://search.qstheory.cn/qiushi/?keyword={keyword}&channelid=269025", "category": "中央级", "media_type": "期刊/网站", "supervisor": "中共中央", "sort_order": 13},
     {"site_name": "光明日报（光明网）", "site_url": "https://www.gmw.cn", "search_url_template": "https://zhonghua.gmw.cn/news.htm", "search_url": "https://zhonghua.gmw.cn/news.htm?q={keyword}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 14},
     {"site_name": "经济日报（中国经济网）", "site_url": "http://www.ce.cn", "search_url_template": "http://www.ce.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "国务院", "sort_order": 15},
-    {"site_name": "中国日报（中国日报网）", "site_url": "https://cn.chinadaily.com.cn", "search_url_template": "https://cn.chinadaily.com.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 16},
-    {"site_name": "科技日报", "site_url": "http://www.stdaily.com", "search_url_template": "http://www.stdaily.com", "category": "中央级", "media_type": "报纸", "supervisor": "科技部", "sort_order": 17},
+    {"site_name": "中国日报（中国日报网）", "site_url": "https://cn.chinadaily.com.cn", "search_url_template": "https://newssearch.chinadaily.com.cn", "search_url": "https://newssearch.chinadaily.com.cn/cn/search?query={keyword}", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 16},
+    {"site_name": "科技日报", "site_url": "https://www.stdaily.com", "search_url_template": "https://search.stdaily.com:8888/founder/NewSearchServlet.do", "search_url": "https://search.stdaily.com:8888/founder/NewSearchServlet.do?siteID=1&content={keyword}", "category": "中央级", "media_type": "报纸", "supervisor": "科技部", "sort_order": 17},
     {"site_name": "工人日报（中工网）", "site_url": "http://www.workercn.cn", "search_url_template": "http://www.workercn.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "中华全国总工会", "sort_order": 18},
     {"site_name": "中国新闻社（中国新闻网）", "site_url": "https://www.chinanews.com.cn", "search_url_template": "https://www.chinanews.com.cn", "category": "中央级", "media_type": "通讯社/网站", "supervisor": "国务院侨办", "sort_order": 19},
     {"site_name": "法治日报", "site_url": "http://www.legaldaily.com.cn", "search_url_template": "http://www.legaldaily.com.cn", "category": "中央级", "media_type": "报纸", "supervisor": "司法部", "sort_order": 20},
@@ -340,6 +340,30 @@ async def _migrate_to_v8(conn):
         logger.warning(f"[DB Init] 更新求是网搜索URL时出现警告: {e}")
 
 
+async def _migrate_to_v9(conn):
+    """迁移到版本 9：更新科技日报搜索URL"""
+    try:
+        stdaily_search_url = "https://search.stdaily.com:8888/founder/NewSearchServlet.do?siteID=1&content={keyword}"
+        await conn.execute(text(
+            "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, site_url = 'https://www.stdaily.com', updated_at = NOW() WHERE site_name = '科技日报'"
+        ), dict(url=stdaily_search_url, template="https://search.stdaily.com:8888/founder/NewSearchServlet.do"))
+        logger.info("[DB Init] 科技日报搜索URL已更新到 v9")
+    except Exception as e:
+        logger.warning(f"[DB Init] 更新科技日报搜索URL时出现警告: {e}")
+
+
+async def _migrate_to_v10(conn):
+    """迁移到版本 10：更新中国日报搜索URL"""
+    try:
+        chinadaily_search_url = "https://newssearch.chinadaily.com.cn/cn/search?query={keyword}"
+        await conn.execute(text(
+            "UPDATE crawl_sites SET search_url = :url, search_url_template = :template, site_url = 'https://cn.chinadaily.com.cn', updated_at = NOW() WHERE site_name = '中国日报（中国日报网）'"
+        ), dict(url=chinadaily_search_url, template="https://newssearch.chinadaily.com.cn"))
+        logger.info("[DB Init] 中国日报搜索URL已更新到 v10")
+    except Exception as e:
+        logger.warning(f"[DB Init] 更新中国日报搜索URL时出现警告: {e}")
+
+
 async def _insert_default_sites(conn, sites, skip_empty_check: bool = True):
     """插入默认网站配置"""
     if skip_empty_check:
@@ -412,6 +436,8 @@ MIGRATIONS = [
     (6, "央视网搜索URL配置", _migrate_to_v6, None),
     (7, "光明日报搜索URL配置", _migrate_to_v7, None),
     (8, "求是网搜索URL配置", _migrate_to_v8, None),
+    (9, "科技日报搜索URL配置", _migrate_to_v9, None),
+    (10, "中国日报搜索URL配置", _migrate_to_v10, None),
 ]
 
 

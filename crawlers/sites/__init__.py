@@ -5,6 +5,7 @@
 
 from crawlers.sites import (
     central,
+    chinadaily,
     ministry,
     province,
     special_zone,
@@ -12,14 +13,17 @@ from crawlers.sites import (
     finance_paper,
     research,
     hubei,
+    stdaily,
 )
 
 CATEGORY_HANDLERS = {
     "中央级": central,
+    "中国日报": chinadaily,
     "各部委级": ministry,
     "省级": province,
     "经济特区": special_zone,
     "财经科技": finance_tech,
+    "科技日报": stdaily,
     "财经报纸": finance_paper,
     "研究院": research,
     "湖北省级": hubei,
