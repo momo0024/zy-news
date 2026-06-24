@@ -47,7 +47,11 @@ async def search(
                     "page": str(page_no),
                     "curType": "story",     # 文章类型
                 }
-                response = await page.request.get(_API_URL, params=params)
+                headers = {
+                    "referer": search_url,
+                    "x-requested-with": "XMLHttpRequest",
+                }
+                response = await page.request.get(_API_URL, params=params, headers=headers)
                 result = await response.json()
             except Exception as e:
                 logger.warning(f"[{site_name}] 第{page_no + 1}页请求失败: {e}")
