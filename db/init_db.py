@@ -46,6 +46,7 @@ NEWS_SITES = [
         "search_url_template": "https://search.cctv.com",
         "search_url": "https://search.cctv.com/search.php?qtext={keyword}&page=1&type=web&sort=date&datepid=3&channel=&vtime=-1&is_search=1",
         "search_scope_support": "none",
+        "is_active": False,
         "category": "中央级", "media_type": "电视台/网站", "supervisor": "中共中央", "sort_order": 12,
     },
     {
@@ -54,6 +55,7 @@ NEWS_SITES = [
         "search_url_template": "https://search.qstheory.cn/qiushi/",
         "search_url": "https://search.qstheory.cn/qiushi/?keyword={keyword}&channelid=269025",
         "search_scope_support": "none",
+        "is_active": False,
         "category": "中央级", "media_type": "期刊/网站", "supervisor": "中共中央", "sort_order": 13,
     },
     {
@@ -66,7 +68,7 @@ NEWS_SITES = [
         "search_scope_support": "both",
         "category": "中央级", "media_type": "报纸/网站", "supervisor": "中共中央", "sort_order": 14,
     },
-    {"site_name": "经济日报（中国经济网）", "site_url": "http://www.ce.cn", "search_url_template": "http://www.ce.cn", "category": "中央级", "media_type": "报纸/网站", "supervisor": "国务院", "sort_order": 15},
+    {"site_name": "经济日报（中国经济网）", "site_url": "http://www.ce.cn", "search_url_template": "http://www.ce.cn", "is_active": False, "category": "中央级", "media_type": "报纸/网站", "supervisor": "国务院", "sort_order": 15},
     {
         "site_name": "中国日报（中国日报网）",
         "site_url": "https://cn.chinadaily.com.cn",
@@ -378,7 +380,7 @@ async def _insert_news_sites(conn, sites):
                     ) VALUES (
                         :name, :url, :tmpl, :surl,
                         :title_url, :body_url, :scope,
-                        :category, :media_type, :supervisor, :order, TRUE
+                        :category, :media_type, :supervisor, :order, :active
                     )
                     ON CONFLICT (site_name) DO NOTHING
                 """),
@@ -394,6 +396,7 @@ async def _insert_news_sites(conn, sites):
                     media_type=site["media_type"],
                     supervisor=site["supervisor"],
                     order=site["sort_order"],
+                    active=site.get("is_active", True),
                 ),
             )
             inserted += 1
@@ -405,7 +408,25 @@ async def _insert_news_sites(conn, sites):
 
 # 增量迁移注册表: [(version, description, migrate_fn, extra_fn)]
 # 重构后基线为 v1；后续 schema/配置变更从 v2 起在此追加
-MIGRATIONS: list = []
+
+_SITES_DISABLED_BY_DEFAULT = (
+    "中央广播电视总台（央视网）",
+    "求是（求是网）",
+    "经济日报（中国经济网）",
+)
+
+
+async def _migrate_v2_disable_default_sites(conn) -> None:
+    for name in _SITES_DISABLED_BY_DEFAULT:
+        await conn.execute(
+            text("UPDATE crawl_sites SET is_active = FALSE WHERE site_name = :name"),
+            {"name": name},
+        )
+
+
+MIGRATIONS: list = [
+    (2, "默认停用央视网、求是网、经济日报爬取", _migrate_v2_disable_default_sites, None),
+]
 
 
 def _target_schema_version() -> int:

@@ -4,7 +4,7 @@
 - searchFields=1 标题 / 0 全文（由 site_crawler 分别调用 search_url_title/body）
 - sortField=1 时间倒序
 - API: GET /getNews（先打开 so.news.cn 首页拿 Cookie，再用 httpx 带 Cookie 请求；
-  page.request / 页面内 fetch 会被 WAF 503；打开搜索 hash 页会污染会话，勿用）
+  httpx 须 trust_env=False，避免继承系统 SOCKS 代理；page.request / 页面内 fetch 会被 WAF 503）
 """
 
 import asyncio
@@ -178,7 +178,11 @@ async def search(
 
         headers = await _build_api_headers(page)
 
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
             while page_no < _MAX_PAGES:
                 page_no += 1
                 logger.debug(
