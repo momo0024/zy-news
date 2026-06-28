@@ -6,7 +6,7 @@ CloakBrowser - 高隐匿浏览器封装
   - 随机 User-Agent + 浏览器指纹
   - 隐匿模式 (stealth)
   - 人类行为模拟 (随机延迟、鼠标移动、自然滚动)
-  - 代理支持
+  - 统一直连，不使用任何代理
   - 默认非无头模式 (便于观察和调试)
 """
 
@@ -20,6 +20,12 @@ from typing import Optional, AsyncIterator
 from loguru import logger
 
 from config import CrawlerConfig, USER_AGENTS, VIEWPORTS
+
+_PROXY_ENV_KEYS = (
+    "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "ftp_proxy", "FTP_PROXY", "no_proxy", "NO_PROXY",
+)
 
 
 class CloakBrowser:
@@ -42,7 +48,8 @@ class CloakBrowser:
     ):
         self.headless = headless if headless is not None else CrawlerConfig.HEADLESS
         self.stealth_mode = stealth_mode if stealth_mode is not None else CrawlerConfig.STEALTH_MODE
-        self.proxy_url = proxy_url or CrawlerConfig.PROXY_URL
+        if proxy_url or os.environ.get("CRAWLER_PROXY"):
+            logger.warning("爬虫已禁用代理，CRAWLER_PROXY / proxy_url 将被忽略")
         self.timeout = timeout
         self.user_agent = user_agent or self._random_ua()
         self.viewport = viewport or self._random_viewport()
@@ -50,6 +57,7 @@ class CloakBrowser:
         self._playwright = None
         self._browser = None
         self._context = None
+        self._cleared_proxy_env: list[tuple[str, str]] = []
 
     # ============================================================
     # 人类行为模拟
@@ -155,6 +163,24 @@ class CloakBrowser:
         vp["height"] += random.randint(-30, 30)
         return vp
 
+    def _clear_proxy_env(self) -> None:
+        """清除进程内代理环境变量，避免 Playwright/httpx 继承系统或 clash 代理"""
+        for var in _PROXY_ENV_KEYS:
+            val = os.environ.pop(var, None)
+            if val is not None:
+                self._cleared_proxy_env.append((var, val))
+        if self._cleared_proxy_env:
+            logger.debug(
+                f"已清除 {len(self._cleared_proxy_env)} 个代理环境变量（爬虫直连）"
+            )
+
+    def _restore_proxy_env(self) -> None:
+        for var, val in self._cleared_proxy_env:
+            os.environ[var] = val
+        if self._cleared_proxy_env:
+            logger.debug(f"已恢复 {len(self._cleared_proxy_env)} 个代理环境变量")
+        self._cleared_proxy_env.clear()
+
     async def _init_playwright(self):
         """初始化 Playwright"""
         try:
@@ -163,28 +189,9 @@ class CloakBrowser:
             logger.error("playwright 未安装，请执行: pip install playwright && playwright install chromium")
             raise
 
-        # 清除系统代理环境变量，避免 Playwright Chromium 继承全局代理
-        # （如 mihomo/clash 等）导致国内网站 ERR_EMPTY_RESPONSE
-        _proxy_vars = [
-            "http_proxy", "https_proxy", "all_proxy",
-            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-            "ftp_proxy", "FTP_PROXY", "no_proxy", "NO_PROXY",
-        ]
-        _cleared = []
-        for _var in _proxy_vars:
-            val = os.environ.pop(_var, None)
-            if val is not None:
-                _cleared.append((_var, val))
-        if _cleared:
-            logger.debug(f"已临时清除 {len(_cleared)} 个代理环境变量")
+        self._clear_proxy_env()
 
         self._playwright = await async_playwright().start()
-
-        # 恢复代理环境变量（不影响 Playwright 子进程，因为已经启动）
-        for _var, _val in _cleared:
-            os.environ[_var] = _val
-        if _cleared:
-            logger.debug(f"已恢复 {len(_cleared)} 个代理环境变量")
 
         # 浏览器边框+工具栏的估算开销（Windows Chrome）
         # 左右边框约 16px，标题栏+地址栏+标签栏约 130px
@@ -227,6 +234,7 @@ class CloakBrowser:
             "--disable-ipc-flooding-protection",
             f"--window-size={window_width},{window_height}",
             f"--window-position={window_x},{window_y}",
+            "--proxy-server=direct://",
         ]
 
         # 无头模式下追加反检测参数
@@ -241,9 +249,6 @@ class CloakBrowser:
             launch_args = [a for a in launch_args if a not in (
                 "--disable-gpu", "--hide-scrollbars"
             )]
-
-        if self.proxy_url:
-            launch_args.append(f"--proxy-server={self.proxy_url}")
 
         try:
             self._browser = await self._playwright.chromium.launch(
@@ -288,9 +293,6 @@ class CloakBrowser:
                 "Upgrade-Insecure-Requests": "1",
             },
         }
-
-        if self.proxy_url:
-            context_options["proxy"] = {"server": self.proxy_url}
 
         self._context = await self._browser.new_context(**context_options)
 
@@ -520,4 +522,5 @@ class CloakBrowser:
             await self._browser.close()
         if self._playwright:
             await self._playwright.stop()
+        self._restore_proxy_env()
         logger.info("CloakBrowser 已关闭")

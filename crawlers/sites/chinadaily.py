@@ -7,8 +7,9 @@
 """
 
 import asyncio
+import json
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from loguru import logger
 
@@ -20,8 +21,15 @@ _API_URL = "https://newssearch.chinadaily.com.cn/rest/cn/search"
 _REFERER = "https://newssearch.chinadaily.com.cn/cn/search/advanced"
 _MAX_PAGES = 50
 _PAGE_SIZE = 10
+_API_TIMEOUT_MS = 60000
+_MAX_RETRIES = 2
 _TAG_RE = re.compile(r"<[^>]+>")
 _SNIPPET_MAX = 500
+_API_HEADERS = {
+    "referer": _REFERER,
+    "x-requested-with": "XMLHttpRequest",
+    "Accept": "application/json, text/plain, */*",
+}
 
 
 def _strip_html(text: str) -> str:
@@ -84,6 +92,74 @@ def _item_from_article(article: dict, keyword: str, site_name: str) -> dict | No
     }
 
 
+async def _fetch_api_json(page, params: dict[str, str]) -> dict | None:
+    """请求搜索 API：page.request 长超时 + 重试；失败时用页面内 fetch 兜底"""
+    api_url = f"{_API_URL}?{urlencode(params)}"
+
+    for attempt in range(1, _MAX_RETRIES + 1):
+        text = ""
+        try:
+            response = await page.request.get(
+                _API_URL,
+                params=params,
+                headers=_API_HEADERS,
+                timeout=_API_TIMEOUT_MS,
+            )
+            text = await response.text()
+            if response.status == 200:
+                return json.loads(text)
+            logger.debug(
+                f"[中国日报] page.request 第{attempt}次 HTTP {response.status}: {text[:100]!r}"
+            )
+        except json.JSONDecodeError as e:
+            logger.warning(f"[中国日报] API 非 JSON: {e}; head={text[:100]!r}")
+        except Exception as e:
+            logger.debug(f"[中国日报] page.request 第{attempt}次异常: {e}")
+
+        try:
+            ev = await page.evaluate(
+                """async ({url, hdr, timeoutMs}) => {
+                    const ctrl = new AbortController();
+                    const tid = setTimeout(() => ctrl.abort(), timeoutMs);
+                    try {
+                        const r = await fetch(url, { headers: hdr, signal: ctrl.signal });
+                        const text = await r.text();
+                        return { ok: true, status: r.status, text };
+                    } catch (e) {
+                        return { ok: false, error: String(e) };
+                    } finally {
+                        clearTimeout(tid);
+                    }
+                }""",
+                {"url": api_url, "hdr": _API_HEADERS, "timeoutMs": _API_TIMEOUT_MS},
+            )
+            if ev.get("ok") and ev.get("status") == 200:
+                return json.loads(ev["text"])
+            logger.debug(
+                f"[中国日报] fetch 第{attempt}次: status={ev.get('status')} err={ev.get('error')}"
+            )
+        except json.JSONDecodeError as e:
+            logger.warning(f"[中国日报] API 非 JSON (fetch): {e}")
+        except Exception as e:
+            logger.debug(f"[中国日报] fetch 第{attempt}次异常: {e}")
+
+        if attempt < _MAX_RETRIES:
+            await page.goto(_REFERER, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1500)
+
+    return None
+
+
+async def _open_session(page, site_name: str) -> bool:
+    try:
+        await page.goto(_REFERER, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1500)
+        return True
+    except Exception as e:
+        logger.warning(f"[{site_name}] 高级搜索页加载失败: {e}")
+        return False
+
+
 async def search(
     browser: CloakBrowser,
     site: dict,
@@ -101,8 +177,8 @@ async def search(
     total_pages = _MAX_PAGES
 
     async with browser.session() as page:
-        await page.goto(_REFERER, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(1000)
+        if not await _open_session(page, site_name):
+            return []
 
         while page_no + 1 < total_pages and page_no + 1 < _MAX_PAGES:
             page_no += 1
@@ -112,20 +188,11 @@ async def search(
                 f"date={params['publishedDateFrom']}~{params['publishedDateTo']}"
             )
 
-            try:
-                response = await page.request.get(
-                    _API_URL,
-                    params=params,
-                    headers={
-                        "referer": _REFERER,
-                        "x-requested-with": "XMLHttpRequest",
-                    },
-                )
-                result = await response.json()
-            except Exception as e:
+            result = await _fetch_api_json(page, params)
+            if result is None:
                 logger.warning(
                     f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
-                    f"第{page_no + 1}页请求失败: {e}"
+                    f"第{page_no + 1}页请求失败（已重试 {_MAX_RETRIES} 次）"
                 )
                 break
 

@@ -187,7 +187,8 @@ class CrawlerConfig:
     # --- 浏览器 ---
     HEADLESS: bool = _env_bool("CRAWLER_HEADLESS", False)  # 默认显示浏览器
     STEALTH_MODE: bool = _env_bool("CRAWLER_STEALTH", True)
-    PROXY_URL: Optional[str] = _env_optional("CRAWLER_PROXY")
+    # 已废弃：爬虫统一直连，不再读取 CRAWLER_PROXY
+    PROXY_URL: Optional[str] = None
 
     # --- 人类行为模拟 (模拟真实用户操作) ---
     HUMAN_DELAY_MIN: float = _env_float("HUMAN_DELAY_MIN", 1.0)
