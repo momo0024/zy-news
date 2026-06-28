@@ -3,8 +3,8 @@
 - 搜索入口: https://so.news.cn/#search/{searchFields}/{keyword}/{curPage}/{sortField}
 - searchFields=1 标题 / 0 全文（由 site_crawler 分别调用 search_url_title/body）
 - sortField=1 时间倒序
-- API: GET /getNews（须先打开 so.news.cn 建立 Cookie，再用 page.request 带 Referer 请求；
-  页面内 fetch 会被 WAF 返回 503 HTML）
+- API: GET /getNews（先打开 so.news.cn 首页拿 Cookie，再用 httpx 带 Cookie 请求；
+  page.request / 页面内 fetch 会被 WAF 503；打开搜索 hash 页会污染会话，勿用）
 """
 
 import asyncio
@@ -12,6 +12,7 @@ import json
 import re
 from urllib.parse import urlencode
 
+import httpx
 from loguru import logger
 
 from crawlers.cloak_browser import CloakBrowser
@@ -29,7 +30,18 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _API_HEADERS = {
     "Referer": _SITE_ORIGIN,
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
+
+
+async def _build_api_headers(page) -> dict[str, str]:
+    cookies = await page.context.cookies("https://so.news.cn")
+    ua = await page.evaluate("navigator.userAgent")
+    return {
+        **_API_HEADERS,
+        "User-Agent": ua,
+        "Cookie": "; ".join(f"{c['name']}={c['value']}" for c in cookies),
+    }
 
 
 def _strip_html(text: str) -> str:
@@ -69,7 +81,8 @@ def _item_from_record(rec: dict, keyword: str, site_name: str) -> dict | None:
 
 
 async def _api_fetch(
-    page,
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
     keyword: str,
     cur_page: int,
     sort_field: int,
@@ -85,11 +98,11 @@ async def _api_fetch(
     api_url = f"{_API_BASE}?{urlencode(params)}"
     text = ""
     try:
-        response = await page.request.get(api_url, headers=_API_HEADERS)
-        text = await response.text()
-        if response.status != 200:
+        response = await client.get(api_url, headers=headers)
+        text = response.text
+        if response.status_code != 200:
             logger.warning(
-                f"[新华社] API 第{cur_page}页 HTTP {response.status}: {text[:120]!r}"
+                f"[新华社] API 第{cur_page}页 HTTP {response.status_code}: {text[:120]!r}"
             )
             return None
         body = json.loads(text)
@@ -122,14 +135,15 @@ async def _api_fetch(
     return content.get("results") or []
 
 
-async def _open_search_session(page, search_url: str, site_name: str) -> bool:
+async def _open_session(page, site_name: str) -> bool:
+    """打开搜索首页建立 Cookie（勿打开 #search hash，会触发 WAF 并污染会话）"""
     retry_delays = [10, 30]
     for attempt, delay in enumerate(retry_delays, start=1):
         try:
-            await page.goto(search_url, wait_until="networkidle", timeout=60000)
+            await page.goto(_SITE_ORIGIN, wait_until="networkidle", timeout=60000)
             await page.wait_for_timeout(2000)
         except Exception as e:
-            logger.warning(f"[{site_name}] 搜索页加载失败 (尝试{attempt}/{len(retry_delays)}): {e}")
+            logger.warning(f"[{site_name}] 首页加载失败 (尝试{attempt}/{len(retry_delays)}): {e}")
             if attempt < len(retry_delays):
                 await asyncio.sleep(delay)
                 continue
@@ -159,50 +173,59 @@ async def search(
     page_no = 0
 
     async with browser.session() as page:
-        if not await _open_search_session(page, search_url, site_name):
+        if not await _open_session(page, site_name):
             return []
 
-        while page_no < _MAX_PAGES:
-            page_no += 1
-            logger.debug(
-                f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no}页 "
-                f"searchFields={search_fields} sortField={sort_field}"
-            )
+        headers = await _build_api_headers(page)
 
-            records = await _api_fetch(
-                page, keyword, page_no, sort_field, search_fields,
-            )
-            if records is None:
-                break
-            if not records:
-                logger.info(
-                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
-                    f"第{page_no}页无结果，停止翻页"
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            while page_no < _MAX_PAGES:
+                page_no += 1
+                logger.debug(
+                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no}页 "
+                    f"searchFields={search_fields} sortField={sort_field}"
                 )
-                break
 
-            page_items = [
-                item for rec in records
-                if (item := _item_from_record(rec, keyword, site_name))
-            ]
-            all_items.extend(page_items)
-
-            logger.info(
-                f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no}页: "
-                f"解析 {len(page_items)} 条，累计 {len(all_items)} 条"
-            )
-
-            if len(records) < _PAGE_SIZE:
-                break
-
-            if not all_items_are_recent(page_items, keep_days):
-                logger.info(
-                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
-                    f"第{page_no}页已出现超期条目，停止翻页"
+                records = await _api_fetch(
+                    client, headers, keyword, page_no, sort_field, search_fields,
                 )
-                break
+                if records is None:
+                    if page_no == 1:
+                        headers = await _build_api_headers(page)
+                        records = await _api_fetch(
+                            client, headers, keyword, page_no, sort_field, search_fields,
+                        )
+                    if records is None:
+                        break
+                if not records:
+                    logger.info(
+                        f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
+                        f"第{page_no}页无结果，停止翻页"
+                    )
+                    break
 
-            await asyncio.sleep(0.5)
+                page_items = [
+                    item for rec in records
+                    if (item := _item_from_record(rec, keyword, site_name))
+                ]
+                all_items.extend(page_items)
+
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no}页: "
+                    f"解析 {len(page_items)} 条，累计 {len(all_items)} 条"
+                )
+
+                if len(records) < _PAGE_SIZE:
+                    break
+
+                if not all_items_are_recent(page_items, keep_days):
+                    logger.info(
+                        f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
+                        f"第{page_no}页已出现超期条目，停止翻页"
+                    )
+                    break
+
+                await asyncio.sleep(0.5)
 
     filtered = filter_recent_news(all_items, keep_days)
     logger.info(
