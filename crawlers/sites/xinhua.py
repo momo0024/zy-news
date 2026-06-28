@@ -101,12 +101,14 @@ def _parse_api_body(body: dict, cur_page: int) -> list[dict] | None:
 
 
 async def _api_fetch(
-    page,
-    headers: dict[str, str],
-    keyword: str,
-    cur_page: int,
-    sort_field: int,
-    search_fields: int,
+        page,
+        headers: dict[str, str],
+        keyword: str,
+        cur_page: int,
+        sort_field: int,
+        search_fields: int,
+        site_name: str,
+        max_retries: int = 3,
 ) -> list[dict] | None:
     params = {
         "keyword": keyword,
@@ -116,26 +118,60 @@ async def _api_fetch(
         "lang": "cn",
     }
     api_url = f"{_API_BASE}?{urlencode(params)}"
-    text = ""
-    try:
-        response = await page.request.get(api_url, headers=headers)
-        text = await response.text()
-        if response.status != 200:
-            logger.warning(
-                f"[新华社] API 第{cur_page}页 HTTP {response.status}: {text[:120]!r}"
-            )
-            return None
-        body = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.warning(
-            f"[新华社] API 第{cur_page}页 非 JSON 响应: {e}; head={text[:120]!r}"
-        )
-        return None
-    except Exception as e:
-        logger.warning(f"[新华社] API 第{cur_page}页 请求失败: {e}")
-        return None
 
-    return _parse_api_body(body, cur_page)
+    for attempt in range(1, max_retries + 1):
+        text = ""
+        try:
+            response = await page.request.get(api_url, headers=headers)
+            text = await response.text()
+
+            # WAF 拦截：返回 HTML 或异常状态码，需要刷新会话
+            if response.status != 200 or "<html" in text[:20].lower() or "<!DOCTYPE" in text[:20].upper():
+                logger.warning(
+                    f"[新华社] API 第{cur_page}页 疑似 WAF 拦截 "
+                    f"(HTTP {response.status}, attempt {attempt}/{max_retries})"
+                )
+                # 刷新 Cookie 会话
+                logger.info(f"[新华社] 尝试刷新 Cookie 会话...")
+                await page.goto(_SITE_ORIGIN, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(random.randint(1500, 3000))
+                # 重新获取 headers（新 Cookie）
+                new_headers = await _build_api_headers(page)
+                # 更新外部 headers 引用
+                headers.clear()
+                headers.update(new_headers)
+                if attempt < max_retries:
+                    await asyncio.sleep(random.uniform(5, 10))
+                    continue
+                else:
+                    return None
+
+            body = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"[新华社] API 第{cur_page}页 非 JSON 响应 (attempt {attempt}/{max_retries}): "
+                f"{text[:120]!r}"
+            )
+            # 非 JSON 说明可能被 WAF 拦截，刷新会话重试
+            if attempt < max_retries:
+                await page.goto(_SITE_ORIGIN, wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(random.randint(1500, 3000))
+                new_headers = await _build_api_headers(page)
+                headers.clear()
+                headers.update(new_headers)
+                await asyncio.sleep(random.uniform(5, 10))
+                continue
+            return None
+        except Exception as e:
+            logger.warning(f"[新华社] API 第{cur_page}页 请求失败: {e}")
+            if attempt < max_retries:
+                await asyncio.sleep(random.uniform(3, 8))
+                continue
+            return None
+
+        return _parse_api_body(body, cur_page)
+
+    return None
 
 
 async def _open_session(page, site_name: str) -> bool:
@@ -161,11 +197,11 @@ async def _open_session(page, site_name: str) -> bool:
 
 
 async def search(
-    browser: CloakBrowser,
-    site: dict,
-    keyword: str,
-    keep_days: int,
-    search_url: str,
+        browser: CloakBrowser,
+        site: dict,
+        keyword: str,
+        keep_days: int,
+        search_url: str,
 ) -> list[dict]:
     """新华网搜索（标题或全文，由 search_url hash 中 searchFields 决定）"""
     site_name = site["site_name"]

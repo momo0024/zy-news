@@ -21,8 +21,8 @@ _API_URL = "https://newssearch.chinadaily.com.cn/rest/cn/search"
 _REFERER = "https://newssearch.chinadaily.com.cn/cn/search/advanced"
 _MAX_PAGES = 50
 _PAGE_SIZE = 10
-_API_TIMEOUT_MS = 60000
-_MAX_RETRIES = 2
+_API_TIMEOUT_MS = 20000   # API 应快速响应，20s 超时足够
+_MAX_RETRIES = 4           # 增加重试次数
 _TAG_RE = re.compile(r"<[^>]+>")
 _SNIPPET_MAX = 500
 _API_HEADERS = {
@@ -161,11 +161,11 @@ async def _open_session(page, site_name: str) -> bool:
 
 
 async def search(
-    browser: CloakBrowser,
-    site: dict,
-    keyword: str,
-    keep_days: int,
-    search_url: str,
+        browser: CloakBrowser,
+        site: dict,
+        keyword: str,
+        keep_days: int,
+        search_url: str,
 ) -> list[dict]:
     """中国日报高级搜索（标题或全文，由 search_url 中 scope 决定）"""
     site_name = site["site_name"]
