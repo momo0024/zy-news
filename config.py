@@ -144,7 +144,6 @@ class LLMConfig:
     "author": "作者（如有）",
     "url": "原文链接",
     "keywords": ["关键词1", "关键词2"],
-    "matched_keyword": "匹配到的搜索关键词",
     "category": "新闻分类 (政策/技术/产业/人才/资金/其他)",
     "related_entities": ["相关机构/企业/人物"]
 }
@@ -206,6 +205,8 @@ class CrawlerConfig:
     KEEP_RECENT_DAYS: int = _env_int("KEEP_RECENT_DAYS", 1)
     # 同时爬取的网站并发数（每个网站内部关键词串行）
     MAX_CONCURRENT_SITES: int = _env_int("MAX_CONCURRENT_SITES", 3)
+    # 人民日报（人民网）官方爬虫协议：关键词间隔（秒，官方 120s，留 5s 余量）
+    PEOPLE_KEYWORD_INTERVAL_SEC: int = _env_int("PEOPLE_KEYWORD_INTERVAL_SEC", 125)
 
     # --- 定时任务 ---
     # 定时爬取时间（24小时制，多个时间用逗号分隔，如 "08:00,15:00"）
@@ -240,6 +241,9 @@ CREATE TABLE IF NOT EXISTS crawl_sites (
     site_url            VARCHAR(1000),
     search_url_template VARCHAR(2000),
     search_url          VARCHAR(2000),
+    search_url_title    VARCHAR(2000),
+    search_url_body     VARCHAR(2000),
+    search_scope_support VARCHAR(20) NOT NULL DEFAULT 'none',
     category            VARCHAR(50),
     media_type          VARCHAR(50),
     supervisor          VARCHAR(500),
@@ -256,6 +260,9 @@ COMMENT ON COLUMN crawl_sites.site_name IS '网站名称（如：百度新闻、
 COMMENT ON COLUMN crawl_sites.site_url IS '网站首页地址';
 COMMENT ON COLUMN crawl_sites.search_url_template IS '搜索URL模板（旧字段），{keyword}为占位符';
 COMMENT ON COLUMN crawl_sites.search_url IS '新闻检索URL，{keyword}为关键词占位符，用于爬取新闻列表，例：https://apps.jmnews.cn/?app=search&controller=index&action=search&wd={keyword}';
+COMMENT ON COLUMN crawl_sites.search_url_title IS '标题检索URL模板（search_scope_support=both 时使用），{keyword} 占位';
+COMMENT ON COLUMN crawl_sites.search_url_body IS '全文检索URL模板（search_scope_support=both 时使用），{keyword} 占位';
+COMMENT ON COLUMN crawl_sites.search_scope_support IS '站点搜索范围能力：none=不支持分标题/全文；all=仅综合搜索；both=支持标题与全文分别搜索';
 COMMENT ON COLUMN crawl_sites.category IS '媒体类别：中央级/各部委级/省级/经济特区/财经科技/财经报纸/研究院/湖北省级/市级';
 COMMENT ON COLUMN crawl_sites.media_type IS '媒体类型：报纸/网站/通讯社/电视台/期刊/智库/新媒体/融媒体平台/研究机构/财经杂志';
 COMMENT ON COLUMN crawl_sites.supervisor IS '主管/主办单位';
@@ -302,7 +309,6 @@ CREATE TABLE IF NOT EXISTS news_data (
     author          VARCHAR(100),
     url             VARCHAR(2000) UNIQUE NOT NULL,
     keywords        JSONB DEFAULT '[]'::jsonb,
-    matched_keyword VARCHAR(200),
     category        VARCHAR(50),
     related_entities JSONB DEFAULT '[]'::jsonb,
     crawl_site_id   INTEGER REFERENCES crawl_sites(id),
@@ -323,8 +329,7 @@ COMMENT ON COLUMN news_data.publish_time IS '新闻发布时间';
 COMMENT ON COLUMN news_data.source IS '新闻来源/媒体名称';
 COMMENT ON COLUMN news_data.author IS '作者';
 COMMENT ON COLUMN news_data.url IS '原文链接，唯一索引用于去重';
-COMMENT ON COLUMN news_data.keywords IS '提取的关键词，JSON数组格式，例：["创新平台","科技政策","成果转化"]';
-COMMENT ON COLUMN news_data.matched_keyword IS '搜索时匹配到的关键词';
+COMMENT ON COLUMN news_data.keywords IS 'AI 提取的关键词，JSON 数组；爬取命中关键词见 news_keyword_hits';
 COMMENT ON COLUMN news_data.category IS '新闻分类：政策/技术/产业/人才/资金/其他';
 COMMENT ON COLUMN news_data.related_entities IS '相关实体，JSON数组，例：[{"name":"XX实验室","type":"机构"}]';
 COMMENT ON COLUMN news_data.crawl_site_id IS '关联爬取来源网站ID';
@@ -339,10 +344,41 @@ COMMENT ON COLUMN news_data.updated_at IS '更新时间';
 CREATE INDEX IF NOT EXISTS idx_news_publish_time ON news_data(publish_time DESC);
 CREATE INDEX IF NOT EXISTS idx_news_source ON news_data(source);
 CREATE INDEX IF NOT EXISTS idx_news_category ON news_data(category);
-CREATE INDEX IF NOT EXISTS idx_news_matched_keyword ON news_data(matched_keyword);
 CREATE INDEX IF NOT EXISTS idx_news_fetch_time ON news_data(fetch_time DESC);
 -- GIN 索引加速 JSONB 字段内数组的查询
 CREATE INDEX IF NOT EXISTS idx_news_keywords_gin ON news_data USING GIN (keywords);
+"""
+
+# ---------- 新闻关键词命中关系表 ----------
+NEWS_KEYWORD_HITS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS news_keyword_hits (
+    id              SERIAL PRIMARY KEY,
+    news_id         INTEGER NOT NULL REFERENCES news_data(id) ON DELETE CASCADE,
+    keyword         VARCHAR(200) NOT NULL,
+    in_title        BOOLEAN,
+    in_body         BOOLEAN,
+    match_source    VARCHAR(32) NOT NULL DEFAULT 'unknown',
+    crawl_site_id   INTEGER REFERENCES crawl_sites(id),
+    first_seen_at   TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (news_id, keyword)
+);
+
+COMMENT ON TABLE  news_keyword_hits IS '文章与爬取关键词的命中关系（标题/正文/来源）';
+COMMENT ON COLUMN news_keyword_hits.news_id IS '关联 news_data.id';
+COMMENT ON COLUMN news_keyword_hits.keyword IS '爬取配置中的关键词';
+COMMENT ON COLUMN news_keyword_hits.in_title IS 'TRUE=标题命中；FALSE=确定未命中；NULL=未知';
+COMMENT ON COLUMN news_keyword_hits.in_body IS 'TRUE=正文/摘要侧命中；NULL=未知';
+COMMENT ON COLUMN news_keyword_hits.match_source IS 'site_title_search/site_body_search/site_combined_search/inferred/unknown';
+COMMENT ON COLUMN news_keyword_hits.crawl_site_id IS '来源站点';
+COMMENT ON COLUMN news_keyword_hits.first_seen_at IS '首次命中时间';
+COMMENT ON COLUMN news_keyword_hits.last_seen_at IS '最近一次爬取仍命中';
+
+CREATE INDEX IF NOT EXISTS idx_nkh_news_id ON news_keyword_hits(news_id);
+CREATE INDEX IF NOT EXISTS idx_nkh_keyword ON news_keyword_hits(keyword);
+CREATE INDEX IF NOT EXISTS idx_nkh_match_source ON news_keyword_hits(match_source);
+CREATE INDEX IF NOT EXISTS idx_nkh_in_title ON news_keyword_hits(in_title) WHERE in_title IS TRUE;
+CREATE INDEX IF NOT EXISTS idx_nkh_in_body ON news_keyword_hits(in_body) WHERE in_body IS TRUE;
 """
 
 # 所有建表语句合并，按依赖顺序执行 (先建配置表，再建数据表)
@@ -350,4 +386,5 @@ ALL_TABLE_SCHEMAS = [
     CRAWL_SITES_SCHEMA,
     CRAWL_KEYWORDS_SCHEMA,
     NEWS_DATA_SCHEMA,
+    NEWS_KEYWORD_HITS_SCHEMA,
 ]

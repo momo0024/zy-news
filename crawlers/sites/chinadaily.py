@@ -1,21 +1,87 @@
 """
-中国日报爬虫
-- 搜索接口: GET https://newssearch.chinadaily.com.cn/rest/cn/search
-- 筛选条件: sort=dp (Newest 最新), curType=story (文章)
-- 翻页: page 从 0 开始，通过 totalPages 判断总页数
-- 日期过滤: 通过 filter_recent_news 保留最近 N 天
-- 遵守爬虫协议: 请求间隔 1-2 秒，单关键词串行翻页
+中国日报（中国日报网）高级搜索爬虫
+- 高级搜索: https://newssearch.chinadaily.com.cn/cn/search/advanced
+- API: GET https://newssearch.chinadaily.com.cn/rest/cn/search
+- titleMust 标题 / fullMust 全文（由 site_crawler 分别调用）
+- sort=dp 最新、duplication=on 去重、publishedDateFrom/To 限定日期
 """
 
-from datetime import datetime, timedelta
+import asyncio
+import re
+from urllib.parse import parse_qs, urlparse
 
 from loguru import logger
 
 from crawlers.cloak_browser import CloakBrowser
-from crawlers.sites.common import filter_recent_news
+from crawlers.sites.common import all_items_are_recent, filter_recent_news
+from utils.timezone import recent_date_range_str
 
 _API_URL = "https://newssearch.chinadaily.com.cn/rest/cn/search"
-_MAX_SAFE_PAGES = 20
+_REFERER = "https://newssearch.chinadaily.com.cn/cn/search/advanced"
+_MAX_PAGES = 50
+_PAGE_SIZE = 10
+_TAG_RE = re.compile(r"<[^>]+>")
+_SNIPPET_MAX = 500
+
+
+def _strip_html(text: str) -> str:
+    return _TAG_RE.sub("", text or "").strip()
+
+
+def _scope_from_url(search_url: str) -> str:
+    params = parse_qs(urlparse(search_url or "").query)
+    scope = (params.get("scope") or ["body"])[0].lower()
+    return "title" if scope == "title" else "body"
+
+
+def _scope_label(scope: str) -> str:
+    return "标题" if scope == "title" else "全文"
+
+
+def _date_range(keep_days: int) -> tuple[str, str]:
+    start, end = recent_date_range_str(keep_days)
+    return start, end
+
+
+def _build_params(keyword: str, scope: str, keep_days: int, page: int) -> dict[str, str]:
+    date_from, date_to = _date_range(keep_days)
+    params: dict[str, str] = {
+        "sort": "dp",
+        "duplication": "on",
+        "publishedDateFrom": date_from,
+        "publishedDateTo": date_to,
+        "page": str(page),
+        "curType": "story",
+    }
+    if scope == "title":
+        params["titleMust"] = keyword
+    else:
+        params["fullMust"] = keyword
+    return params
+
+
+def _item_from_article(article: dict, keyword: str, site_name: str) -> dict | None:
+    title = _strip_html(article.get("title", ""))
+    url = (article.get("url") or "").strip()
+    if not title or not url:
+        return None
+
+    pub_time = (article.get("pubDateStr") or "").strip()
+    source = (article.get("source") or site_name).strip()
+
+    snippet = _strip_html(article.get("highlightContent") or "")
+    if not snippet:
+        plain = _strip_html(article.get("plainText") or "")
+        snippet = plain[:_SNIPPET_MAX] if plain else ""
+
+    return {
+        "title": title,
+        "url": url,
+        "publish_time": pub_time,
+        "source": source,
+        "keyword": keyword,
+        "abstract": snippet,
+    }
 
 
 async def search(
@@ -25,120 +91,84 @@ async def search(
     keep_days: int,
     search_url: str,
 ) -> list[dict]:
-    """中国日报搜索入口
-
-    Args:
-        browser: CloakBrowser 实例
-        site: 网站配置字典
-        keyword: 搜索关键词
-        keep_days: 保留最近 N 天
-        search_url: 数据库配置的搜索 URL（含替换后的关键词，当前未使用，直接调 API）
-    """
+    """中国日报高级搜索（标题或全文，由 search_url 中 scope 决定）"""
     site_name = site["site_name"]
+    scope = _scope_from_url(search_url)
+    scope_label = _scope_label(scope)
+
     all_items: list[dict] = []
-    page_no = 0
+    page_no = -1
+    total_pages = _MAX_PAGES
 
     async with browser.session() as page:
-        while page_no < _MAX_SAFE_PAGES:
+        await page.goto(_REFERER, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1000)
+
+        while page_no + 1 < total_pages and page_no + 1 < _MAX_PAGES:
+            page_no += 1
+            params = _build_params(keyword, scope, keep_days, page_no)
+            logger.debug(
+                f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no + 1}页 "
+                f"date={params['publishedDateFrom']}~{params['publishedDateTo']}"
+            )
+
             try:
-                params = {
-                    "keywords": keyword,
-                    "sort": "dp",           # Newest 最新
-                    "page": str(page_no),
-                    "curType": "story",     # 文章类型
-                }
-                headers = {
-                    "referer": search_url,
-                    "x-requested-with": "XMLHttpRequest",
-                }
-                response = await page.request.get(_API_URL, params=params, headers=headers)
+                response = await page.request.get(
+                    _API_URL,
+                    params=params,
+                    headers={
+                        "referer": _REFERER,
+                        "x-requested-with": "XMLHttpRequest",
+                    },
+                )
                 result = await response.json()
             except Exception as e:
-                logger.warning(f"[{site_name}] 第{page_no + 1}页请求失败: {e}")
+                logger.warning(
+                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
+                    f"第{page_no + 1}页请求失败: {e}"
+                )
                 break
 
-            articles = result.get("content", [])
+            articles = result.get("content") or []
             if not articles:
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
+                    f"第{page_no + 1}页无结果，停止翻页"
+                )
                 break
 
-            for article in articles:
-                try:
-                    title = article.get("title", "").strip()
-                    url = article.get("url", "").strip()
+            page_items = [
+                item for art in articles
+                if (item := _item_from_article(art, keyword, site_name))
+            ]
+            all_items.extend(page_items)
 
-                    # 优先使用 pubDateStr，否则从 publishTime 时间戳转换
-                    pub_date_str = article.get("pubDateStr", "").strip()
-                    if not pub_date_str and article.get("publishTime"):
-                        try:
-                            ts = article["publishTime"]
-                            if isinstance(ts, (int, float)):
-                                # publishTime 是毫秒时间戳
-                                dt = datetime.fromtimestamp(ts / 1000)
-                                pub_date_str = dt.strftime("%Y-%m-%d %H:%M")
-                        except Exception:
-                            pass
+            total_pages = min(int(result.get("totalPages") or 1), _MAX_PAGES)
 
-                    source = article.get("source", "") or site_name
+            logger.info(
+                f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 第{page_no + 1}页: "
+                f"解析 {len(page_items)} 条，累计 {len(all_items)} 条"
+            )
 
-                    if title and url:
-                        all_items.append({
-                            "title": title,
-                            "url": url,
-                            "publish_time": pub_date_str,
-                            "source": source,
-                            "matched_keyword": keyword,
-                        })
-                except Exception as e:
-                    logger.warning(f"[{site_name}] 解析条目失败: {e}")
+            if len(articles) < _PAGE_SIZE:
+                break
 
-            # 检查是否还有更多页
-            total_pages = result.get("totalPages", 0)
+            if not all_items_are_recent(page_items, keep_days):
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] {scope_label}检索 "
+                    f"第{page_no + 1}页已出现超期条目，停止翻页"
+                )
+                break
+
             if page_no + 1 >= total_pages:
-                logger.debug(f"[{site_name}] 已到最后一页（{total_pages}页）")
                 break
 
-            # 日期感知：如果当前页已混入非近 N 天新闻，停止翻页
-            page_items = all_items[-len(articles):]
-            if not _all_items_are_recent(page_items, keep_days):
-                logger.info(f"[{site_name}] 第{page_no + 1}页已混入非近{keep_days}天新闻，停止翻页")
-                break
+            await asyncio.sleep(0.5)
 
-            page_no += 1
-            await CloakBrowser.human_delay(1.0, 2.0)
-
+    filtered = filter_recent_news(all_items, keep_days)
     logger.info(
-        f"[{site_name}] 翻页完成，共 {page_no + 1} 页，解析 {len(all_items)} 条"
+        f"[{site_name}] 关键词 [{keyword}] {scope_label}检索结束: "
+        f"翻{page_no + 1}页, 解析 {len(all_items)} 条, "
+        f"时间过滤后 {len(filtered)} 条（保留近 {keep_days} 天）"
     )
-    return filter_recent_news(all_items, keep_days)
-
-
-def _all_items_are_recent(items: list[dict], keep_days: int) -> bool:
-    """检查列表中是否全部都是最近 N 天的新闻"""
-    if not items:
-        return False
-    cutoff = datetime.now() - timedelta(days=keep_days)
-    for item in items:
-        dt = _parse_item_date(item)
-        if dt is None or dt < cutoff:
-            return False
-    return True
-
-
-def _parse_item_date(item: dict) -> datetime | None:
-    """从 item 字典中解析发布时间为 datetime"""
-    pub_time = item.get("publish_time", "")
-    if not pub_time:
-        return None
-    for fmt in [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
-        "%Y/%m/%d %H:%M:%S",
-        "%Y/%m/%d %H:%M",
-        "%Y/%m/%d",
-    ]:
-        try:
-            return datetime.strptime(str(pub_time).strip(), fmt)
-        except ValueError:
-            continue
-    return None
+    return filtered

@@ -23,8 +23,8 @@ async def lifespan(app: FastAPI):
     """
     logger.info("[FastAPI] 服务启动中...")
 
-    pool = await get_pool()
-    await init_database(pool)
+    await get_pool()
+    await init_database()
 
     logger.info("[FastAPI] 服务已就绪")
 

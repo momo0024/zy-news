@@ -21,7 +21,13 @@ from db.pool import get_engine, close_global_engine
 from db.init_db import init_database
 from crawlers.cloak_browser import CloakBrowser
 from crawlers.sites import get_search_handler
-from crawlers.sites.common import filter_recent_news, save_news_to_db
+from crawlers.sites.common import save_news_to_db
+from utils.keyword_hit import (
+    CRAWL_SCOPE_ALL,
+    build_search_url,
+    crawl_scope_to_match_source,
+    resolve_crawl_modes,
+)
 
 # 初始化日志文件输出（直接运行本文件时生效）
 from pathlib import Path as _Path
@@ -43,11 +49,12 @@ logger.add(
 # ============================================================
 
 async def get_active_sites() -> list[dict]:
-    """从数据库获取所有有 search_url 的启用网站（含分类）"""
+    """从数据库获取所有有 search_url 的启用网站（含分类与搜索范围配置）"""
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
-            SELECT id, site_name, site_url, search_url, category
+            SELECT id, site_name, site_url, search_url, search_url_title, search_url_body,
+                   search_scope_support, category
             FROM crawl_sites
             WHERE is_active = TRUE AND search_url IS NOT NULL AND search_url != ''
             ORDER BY sort_order
@@ -76,61 +83,92 @@ async def crawl_site(site: dict, keywords: list[str], browser: CloakBrowser) -> 
     返回实际新增条数
     """
     site_name = site["site_name"]
-    search_url_template = site["search_url"]
     site_id = site.get("id")
     site_url = site.get("site_url", "")
     category = site.get("category", "")
     keep_days = CrawlerConfig.KEEP_RECENT_DAYS
-
-    # 获取分类处理模块
-    handler = get_search_handler(category)
+    crawl_modes = resolve_crawl_modes(site)
+    if "法治日报" in site_name or "legaldaily" in site_url.lower():
+        crawl_modes = [CRAWL_SCOPE_ALL]
+        from crawlers.sites import legaldaily
+        handler = legaldaily
+    else:
+        handler = get_search_handler(category)
 
     start_time = time.time()
-    logger.info(f"[{site_name}] 开始爬取，共 {len(keywords)} 个关键词，保留近 {keep_days} 天")
+    if "法治日报" in site_name or "legaldaily" in site_url.lower():
+        scope_label = "title+body"
+    else:
+        scope_label = "+".join(crawl_modes)
+    logger.info(
+        f"[{site_name}] 开始爬取，共 {len(keywords)} 个关键词，"
+        f"搜索模式 [{scope_label}]，保留近 {keep_days} 天"
+    )
     total_saved = 0
 
     for i, keyword in enumerate(keywords):
         logger.info(f"[{site_name}] [{i+1}/{len(keywords)}] 关键词: {keyword}")
 
         encoded_kw = quote(keyword)
-        search_url = search_url_template.replace("{keyword}", encoded_kw)
-        if "{timestamp}" in search_url:
-            search_url = search_url.replace("{timestamp}", str(int(time.time() * 1000)))
-        logger.debug(f"[{site_name}] 搜索URL: {search_url}")
+        keyword_saved = 0
 
-        try:
-            all_items = await handler.search(
-                browser, site, keyword, keep_days, search_url,
-            )
-
-            logger.info(f"[{site_name}] 关键词 [{keyword}] 解析到 {len(all_items)} 条（已按时间过滤）")
-
-            if not all_items:
+        for crawl_scope in crawl_modes:
+            search_url = build_search_url(site, encoded_kw, crawl_scope)
+            if not search_url:
+                logger.warning(f"[{site_name}] 关键词 [{keyword}] 模式 [{crawl_scope}] 无可用 URL，跳过")
                 continue
 
-            filtered = filter_recent_news(all_items, keep_days)
-            logger.info(f"[{site_name}] 关键词 [{keyword}] 二次时间过滤后: {len(filtered)} 条")
+            logger.debug(f"[{site_name}] 模式 [{crawl_scope}] 搜索URL: {search_url}")
 
-            if filtered:
-                saved = await save_news_to_db(filtered, site_id)
-                total_saved += saved
-                duplicated = len(filtered) - saved
-                logger.info(
-                    f"[{site_name}] 关键词 [{keyword}] 数据库去重: "
-                    f"新增 {saved} 条, 重复跳过 {duplicated} 条"
+            try:
+                all_items = await handler.search(
+                    browser, site, keyword, keep_days, search_url,
                 )
 
-            # 关键词间延迟
-            if i < len(keywords) - 1:
-                if "人民" in site_name or "people" in site_url.lower():
-                    logger.debug(f"[{site_name}] 遵守爬虫协议，等待 6s...")
-                    await asyncio.sleep(6)
-                else:
-                    await CloakBrowser.human_delay(2.0, 4.0)
+                for item in all_items:
+                    if not item.get("keyword"):
+                        item["keyword"] = keyword
+                    if not item.get("match_source"):
+                        item["match_source"] = crawl_scope_to_match_source(crawl_scope)
 
-        except Exception as e:
-            logger.error(f"[{site_name}] 关键词 [{keyword}] 爬取失败: {e}")
-            continue
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] 模式 [{crawl_scope}] "
+                    f"解析到 {len(all_items)} 条（已按时间过滤）"
+                )
+
+                if not all_items:
+                    continue
+
+                saved = await save_news_to_db(all_items, site_id)
+                keyword_saved += saved
+                duplicated = len(all_items) - saved
+                logger.info(
+                    f"[{site_name}] 关键词 [{keyword}] 模式 [{crawl_scope}] 入库: "
+                    f"新增 {saved} 条, 重复/合并跳过 {duplicated} 条"
+                )
+
+                if crawl_scope != crawl_modes[-1]:
+                    await CloakBrowser.human_delay(1.0, 2.0)
+
+            except Exception as e:
+                logger.error(
+                    f"[{site_name}] 关键词 [{keyword}] 模式 [{crawl_scope}] 爬取失败: {e}"
+                )
+                continue
+
+        total_saved += keyword_saved
+
+        # 关键词间延迟
+        if i < len(keywords) - 1:
+            if (
+                ("人民网" in site_name or "people.com.cn" in site_url.lower())
+                and "人民政协" not in site_name
+            ):
+                wait_sec = CrawlerConfig.PEOPLE_KEYWORD_INTERVAL_SEC
+                logger.debug(f"[{site_name}] 遵守爬虫协议，等待 {wait_sec}s...")
+                await asyncio.sleep(wait_sec)
+            else:
+                await CloakBrowser.human_delay(2.0, 4.0)
 
     elapsed = time.time() - start_time
     logger.info(f"[{site_name}] 爬取完成，实际新增 {total_saved} 条，耗时 {elapsed:.1f} 秒")

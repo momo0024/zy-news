@@ -28,7 +28,17 @@ def parse_app_datetime(value: str) -> datetime | None:
     if not value or not str(value).strip():
         return None
     text = str(value).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y.%m.%d %H:%M:%S",
+        "%Y.%m.%d %H:%M",
+        "%Y.%m.%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+    ):
         try:
             return datetime.strptime(text, fmt).replace(tzinfo=APP_TZ)
         except ValueError:
@@ -38,3 +48,33 @@ def parse_app_datetime(value: str) -> datetime | None:
         return to_app_tz(parsed)
     except ValueError:
         return None
+
+
+def parse_app_date(value: str):
+    """从发布 time 字符串提取日期（列表页仅有 YYYY-MM-DD 时使用）"""
+    from datetime import date
+    dt = parse_app_datetime(value)
+    return dt.date() if dt else None
+
+
+def recent_cutoff_date(keep_days: int):
+    """
+    最近 N 个自然日（含今天）的起始日期。
+    keep_days=1 → 仅今天；2 → 今天+昨天。
+    """
+    from datetime import date, timedelta
+    today = datetime.now(APP_TZ).date()
+    return today - timedelta(days=max(0, keep_days - 1))
+
+
+def recent_date_range_str(keep_days: int) -> tuple[str, str]:
+    """站点搜索 API 用的 startDate / endDate（YYYY-MM-DD）"""
+    today = datetime.now(APP_TZ).date()
+    start = recent_cutoff_date(keep_days)
+    return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+
+def recent_date_range_dots(keep_days: int) -> tuple[str, str]:
+    """学习时报等站点用的 starttime / endtime（YYYY.MM.DD）"""
+    start, end = recent_date_range_str(keep_days)
+    return start.replace("-", "."), end.replace("-", ".")

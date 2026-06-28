@@ -249,15 +249,28 @@ class CloakBrowser:
             self._browser = await self._playwright.chromium.launch(
                 headless=self.headless,
                 args=launch_args,
-                slow_mo=random.randint(30, 80) if not self.headless else 0,  # 操作间微量延迟
+                slow_mo=random.randint(30, 80) if not self.headless else 0,
             )
             logger.info(
                 f"CloakBrowser 启动 | headless={self.headless} | "
                 f"viewport={self.viewport['width']}x{self.viewport['height']}"
             )
         except Exception as e:
-            logger.error(f"浏览器启动失败: {e}")
-            raise
+            logger.warning(f"内置 Chromium 启动失败: {e}，尝试本机 Chrome (channel=chrome)")
+            try:
+                self._browser = await self._playwright.chromium.launch(
+                    channel="chrome",
+                    headless=self.headless,
+                    args=launch_args,
+                    slow_mo=random.randint(30, 80) if not self.headless else 0,
+                )
+                logger.info(
+                    f"CloakBrowser 启动(本机 Chrome) | headless={self.headless} | "
+                    f"viewport={self.viewport['width']}x{self.viewport['height']}"
+                )
+            except Exception as e2:
+                logger.error(f"浏览器启动失败: {e2}")
+                raise
 
     async def _create_context(self):
         """创建隐匿浏览器上下文"""

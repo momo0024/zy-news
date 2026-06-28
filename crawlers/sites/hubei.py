@@ -8,7 +8,6 @@ from loguru import logger
 from crawlers.sites.common import (
     all_items_are_recent,
     filter_recent_news,
-    parse_generic_search_results,
     search_generic_with_pagination,
 )
 
@@ -38,7 +37,7 @@ def _parse_jmnews(html: str, keyword: str, site_name: str, site_url: str) -> lis
                     "url": url,
                     "publish_time": date_str,
                     "source": site_name,
-                    "matched_keyword": keyword,
+                    "keyword": keyword,
                 })
         except Exception as e:
             logger.warning(f"解析条目失败: {e}")

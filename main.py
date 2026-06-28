@@ -74,8 +74,8 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--api-port", type=int, default=8066,
-        help="API 服务端口 (默认: 8066)",
+        "--api-port", type=int, default=9094,
+        help="API 服务端口 (默认: 9094)",
     )
 
     parser.add_argument(
@@ -118,8 +118,6 @@ async def _start_api_server(host: str, port: int, log_level: str):
 async def _start_scheduler():
     """启动定时爬取任务"""
     from crawlers.site_crawler import crawl_all_sites
-    from db.init_db import init_database
-    await init_database()
 
     schedule_times = CrawlerConfig.CRAWL_SCHEDULE_TIMES
     logger.info(f"定时爬取模式启动，每天 {', '.join(schedule_times)} 执行")
@@ -187,14 +185,14 @@ async def main():
     # ---------- 只启动定时爬取模式 ----------
     if args.schedule and not args.api:
         logger.info("启动定时爬取任务...")
+        from db.init_db import init_database
+        await init_database()
         await _start_scheduler()
         return
 
     # ---------- 立即执行一次爬取 ----------
     if args.crawl:
         from crawlers.site_crawler import crawl_all_sites
-        from db.init_db import init_database
-        await init_database()
         await crawl_all_sites(site_names=args.crawl_sites)
         return
 

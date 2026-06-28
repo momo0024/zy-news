@@ -77,7 +77,7 @@ def parse_generic_search_results(html: str, keyword: str, site_name: str, site_u
                     "url": url,
                     "publish_time": date_str,
                     "source": site_name,
-                    "matched_keyword": keyword,
+                    "keyword": keyword,
                 })
         except Exception as e:
             logger.warning(f"解析条目失败: {e}")
@@ -101,26 +101,48 @@ def deduplicate_by_url(items: list[dict]) -> list[dict]:
 
 
 # ============================================================
-# 日期过滤
+# 日期过滤（按北京时间自然日，不依赖时分秒；未进详情页）
 # ============================================================
 
+def _item_publish_date(item: dict):
+    """从列表项解析发布日期；法治日报等 API 通常只有 YYYY-MM-DD"""
+    from utils.timezone import parse_app_date
+    pub_time = item.get("publish_time", "")
+    if not pub_time:
+        return None
+    d = parse_app_date(str(pub_time))
+    if d:
+        return d
+    dt = _parse_item_date(item)
+    return dt.date() if dt else None
+
+
 def filter_recent_news(items: list[dict], keep_days: int = 1) -> list[dict]:
-    """只保留最近 N 天的新闻"""
-    now = datetime.now()
-    cutoff = now - timedelta(days=keep_days)
+    """
+    只保留最近 N 个自然日内发布的新闻（含今天）。
+    列表页只有年月日时，按日期比较，不按 0 点与当前时刻比。
+    """
+    from utils.timezone import recent_cutoff_date
+    cutoff = recent_cutoff_date(keep_days)
     filtered = []
     for item in items:
-        dt = _parse_item_date(item)
-        if dt and dt >= cutoff:
+        pub_date = _item_publish_date(item)
+        if pub_date is None:
+            continue
+        if pub_date >= cutoff:
             filtered.append(item)
     return filtered
 
 
 def _parse_item_date(item: dict) -> datetime | None:
-    """从 item 字典中解析发布时间为 datetime"""
+    """从 item 解析发布时间（兼容带时分秒的字符串）"""
     pub_time = item.get("publish_time", "")
     if not pub_time:
         return None
+    from utils.timezone import parse_app_datetime
+    dt = parse_app_datetime(str(pub_time).strip())
+    if dt:
+        return dt.replace(tzinfo=None)
     for fmt in [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
@@ -137,13 +159,14 @@ def _parse_item_date(item: dict) -> datetime | None:
 
 
 def all_items_are_recent(items: list[dict], keep_days: int) -> bool:
-    """检查列表中是否**全部**都是最近 N 天的新闻（有一页没显示全才需要翻页）"""
+    """本页结果是否都在最近 keep_days 个自然日内（用于翻页停止）"""
+    from utils.timezone import recent_cutoff_date
     if not items:
         return False
-    cutoff = datetime.now() - timedelta(days=keep_days)
+    cutoff = recent_cutoff_date(keep_days)
     for item in items:
-        dt = _parse_item_date(item)
-        if dt is None or dt < cutoff:
+        pub_date = _item_publish_date(item)
+        if pub_date is None or pub_date < cutoff:
             return False
     return True
 
@@ -153,49 +176,132 @@ def all_items_are_recent(items: list[dict], keep_days: int) -> bool:
 # ============================================================
 
 async def save_news_to_db(items: list[dict], site_id: int | None = None) -> int:
-    """保存新闻到数据库，返回实际新增条数"""
+    """保存新闻：url 去重文章表，(news_id, keyword) 合并命中关系表"""
     if not items:
         return 0
 
+    from utils.keyword_hit import (
+        MATCH_SOURCE_UNKNOWN,
+        is_keyword_hit_verified,
+        merge_hit_flags,
+        resolve_hit_flags,
+    )
+
     engine = await get_engine()
     saved = 0
+    now = datetime.now(APP_TZ)
 
     async with engine.begin() as conn:
         for item in items:
             try:
-                pub_time = parse_app_datetime(item.get("publish_time", ""))
+                keyword = (item.get("keyword") or "").strip()
+                if not keyword:
+                    continue
 
-                result = await conn.execute(
-                    text("""
-                        INSERT INTO news_data (
-                            title, publish_time, source, url,
-                            keywords, matched_keyword, category,
-                            related_entities, fetch_time, content_hash,
-                            crawl_site_id
-                        ) VALUES (
-                            :title, :publish_time, :source, :url,
-                            CAST(:keywords AS jsonb), :matched_keyword, :category,
-                            CAST(:related_entities AS jsonb), :fetch_time, :content_hash,
-                            :crawl_site_id
-                        )
-                        ON CONFLICT (url) DO NOTHING
-                    """),
-                    dict(
-                        title=item["title"],
-                        publish_time=pub_time,
-                        source=item.get("source", ""),
-                        url=item["url"],
-                        keywords=json.dumps([item["matched_keyword"]], ensure_ascii=False),
-                        matched_keyword=item["matched_keyword"],
-                        category="",
-                        related_entities=json.dumps([], ensure_ascii=False),
-                        fetch_time=datetime.now(APP_TZ),
-                        content_hash=str(hash(item["title"] + item["url"])),
-                        crawl_site_id=site_id,
-                    ),
+                pub_time = parse_app_datetime(item.get("publish_time", ""))
+                snippet = item.get("abstract") or item.get("snippet") or item.get("summary")
+                match_source = item.get("match_source") or MATCH_SOURCE_UNKNOWN
+
+                in_title, in_body, match_source = resolve_hit_flags(
+                    keyword,
+                    item.get("title", ""),
+                    snippet=snippet,
+                    match_source=match_source,
                 )
-                if result.rowcount and result.rowcount > 0:
+                if not is_keyword_hit_verified(in_title, in_body):
+                    logger.debug(
+                        f"跳过未校验命中 [{keyword}] "
+                        f"{item.get('title', '')[:40]}"
+                    )
+                    continue
+
+                existing_news = (await conn.execute(
+                    text("SELECT id FROM news_data WHERE url = :url"),
+                    {"url": item["url"]},
+                )).mappings().fetchone()
+
+                if existing_news:
+                    news_id = existing_news["id"]
+                    await conn.execute(
+                        text("UPDATE news_data SET updated_at = NOW() WHERE id = :id"),
+                        {"id": news_id},
+                    )
+                else:
+                    result = await conn.execute(
+                        text("""
+                            INSERT INTO news_data (
+                                title, publish_time, source, url,
+                                category, related_entities, fetch_time, content_hash,
+                                crawl_site_id
+                            ) VALUES (
+                                :title, :publish_time, :source, :url,
+                                :category, CAST(:related_entities AS jsonb), :fetch_time, :content_hash,
+                                :crawl_site_id
+                            )
+                            RETURNING id
+                        """),
+                        dict(
+                            title=item["title"],
+                            publish_time=pub_time,
+                            source=item.get("source", ""),
+                            url=item["url"],
+                            category="",
+                            related_entities=json.dumps([], ensure_ascii=False),
+                            fetch_time=now,
+                            content_hash=str(hash(item["title"] + item["url"])),
+                            crawl_site_id=site_id,
+                        ),
+                    )
+                    news_id = result.scalar()
                     saved += 1
+
+                existing_hit = (await conn.execute(
+                    text("""
+                        SELECT id, in_title, in_body, match_source
+                        FROM news_keyword_hits
+                        WHERE news_id = :nid AND keyword = :kw
+                    """),
+                    {"nid": news_id, "kw": keyword},
+                )).mappings().fetchone()
+
+                if existing_hit:
+                    m_title, m_body, m_source = merge_hit_flags(
+                        existing_hit["in_title"],
+                        existing_hit["in_body"],
+                        existing_hit["match_source"],
+                        in_title,
+                        in_body,
+                        match_source,
+                    )
+                    await conn.execute(
+                        text("""
+                            UPDATE news_keyword_hits SET
+                                in_title = :it, in_body = :ib, match_source = :ms,
+                                crawl_site_id = COALESCE(:sid, crawl_site_id),
+                                last_seen_at = :now
+                            WHERE id = :id
+                        """),
+                        dict(
+                            it=m_title, ib=m_body, ms=m_source,
+                            sid=site_id, now=now, id=existing_hit["id"],
+                        ),
+                    )
+                else:
+                    await conn.execute(
+                        text("""
+                            INSERT INTO news_keyword_hits (
+                                news_id, keyword, in_title, in_body, match_source,
+                                crawl_site_id, first_seen_at, last_seen_at
+                            ) VALUES (
+                                :nid, :kw, :it, :ib, :ms, :sid, :now, :now
+                            )
+                        """),
+                        dict(
+                            nid=news_id, kw=keyword, it=in_title, ib=in_body,
+                            ms=match_source, sid=site_id, now=now,
+                        ),
+                    )
+
             except Exception as e:
                 logger.error(f"保存失败 [{item.get('title', '')[:40]}]: {e}")
 

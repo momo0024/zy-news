@@ -6,7 +6,7 @@ from .pool import (
     get_pool,
     close_pool,
 )
-from .init_db import init_database
+from .init_db import init_database, ensure_database_exists
 
 __all__ = [
     "create_engine",
@@ -16,4 +16,5 @@ __all__ = [
     "get_pool",
     "close_pool",
     "init_database",
+    "ensure_database_exists",
 ]
