@@ -65,7 +65,7 @@ def parse_args():
 
     parser.add_argument(
         "--api", action="store_true",
-        help="只启动 FastAPI 服务 (默认端口 8066)",
+        help="只启动 FastAPI 服务 (默认端口 9094)",
     )
 
     parser.add_argument(
