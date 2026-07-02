@@ -27,7 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from utils.logger import setup_logger, get_logger
-from config import CrawlerConfig, LogConfig
+from config import CrawlerConfig, LogConfig, MeetingConfig
 
 logger = get_logger(__name__)
 
@@ -89,6 +89,16 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--crawl-meetings", action="store_true",
+        help="立即执行会议/论坛监测（中央媒体 + 百度搜索）",
+    )
+
+    parser.add_argument(
+        "--crawl-meetings-sites", nargs="+", default=None,
+        help="指定会议监测的网站名称（覆盖默认分组）",
+    )
+
+    parser.add_argument(
         "--schedule", action="store_true",
         help="只启动定时爬取任务",
     )
@@ -116,15 +126,21 @@ async def _start_api_server(host: str, port: int, log_level: str):
 
 
 async def _start_scheduler():
-    """启动定时爬取任务"""
+    """启动定时爬取任务（新闻 + 会议监测）"""
     from crawlers.site_crawler import crawl_all_sites
+    from crawlers.meeting_crawler import crawl_meeting_sites
 
     schedule_times = CrawlerConfig.CRAWL_SCHEDULE_TIMES
-    logger.info(f"定时爬取模式启动，每天 {', '.join(schedule_times)} 执行")
+    meeting_interval = MeetingConfig.SCHEDULE_INTERVAL_DAYS
+    logger.info(
+        f"定时任务启动 | 新闻: 每天 {', '.join(schedule_times)} | "
+        f"会议: 每 {meeting_interval} 天 {MeetingConfig.SCHEDULE_TIME}"
+    )
 
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
     except ImportError:
         logger.error("apscheduler 未安装，请执行: pip install apscheduler")
         raise
@@ -140,9 +156,37 @@ async def _start_scheduler():
                 name=f"每日新闻爬取-{time_str}",
                 misfire_grace_time=3600,
             )
-            logger.info(f"定时任务已注册: 每天 {time_str} 执行爬取")
+            logger.info(f"定时任务已注册: 每天 {time_str} 新闻爬取")
         except ValueError:
             logger.warning(f"定时时间格式错误，已跳过: {time_str}")
+
+    try:
+        hour, minute = MeetingConfig.SCHEDULE_TIME.split(":")
+        start_hour, start_minute = int(hour), int(minute)
+    except ValueError:
+        start_hour, start_minute = 9, 0
+        logger.warning("MEETING_SCHEDULE_TIME 格式错误，使用默认 09:00")
+
+    from datetime import datetime, timedelta
+    from utils.timezone import APP_TZ
+
+    now = datetime.now(APP_TZ)
+    first_run = now.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    if first_run <= now:
+        first_run += timedelta(days=1)
+
+    scheduler.add_job(
+        crawl_meeting_sites,
+        IntervalTrigger(days=meeting_interval, start_date=first_run),
+        id="meeting_crawl",
+        name=f"会议监测-每{meeting_interval}天",
+        misfire_grace_time=86400,
+    )
+    logger.info(
+        f"定时任务已注册: 每 {meeting_interval} 天 {start_hour:02d}:{start_minute:02d} "
+        f"会议监测（中央媒体 + 百度搜索，首次 {first_run.strftime('%Y-%m-%d %H:%M')}）"
+    )
+
     scheduler.start()
 
     # 保持运行
@@ -190,6 +234,12 @@ async def main():
         await _start_scheduler()
         return
 
+    # ---------- 立即执行一次会议监测 ----------
+    if args.crawl_meetings:
+        from crawlers.meeting_crawler import crawl_meeting_sites
+        await crawl_meeting_sites(site_names=args.crawl_meetings_sites)
+        return
+
     # ---------- 立即执行一次爬取 ----------
     if args.crawl:
         from crawlers.site_crawler import crawl_all_sites
@@ -201,7 +251,11 @@ async def main():
     logger.info("zy-news 新闻爬虫系统")
     logger.info("默认模式：同时启动 API 服务 + 定时爬取任务")
     logger.info(f"API 地址: http://{args.api_host}:{args.api_port}")
-    logger.info(f"定时任务: 每天 {', '.join(CrawlerConfig.CRAWL_SCHEDULE_TIMES)} 执行")
+    logger.info(f"新闻定时: 每天 {', '.join(CrawlerConfig.CRAWL_SCHEDULE_TIMES)}")
+    logger.info(
+        f"会议定时: 每 {MeetingConfig.SCHEDULE_INTERVAL_DAYS} 天 "
+        f"{MeetingConfig.SCHEDULE_TIME}（中央媒体 + 百度搜索）"
+    )
     logger.info("=" * 60)
 
     # 先初始化数据库

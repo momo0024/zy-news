@@ -16,7 +16,7 @@ from urllib.parse import quote
 from loguru import logger
 from sqlalchemy import text
 
-from config import CrawlerConfig
+from config import CrawlerConfig, MONITOR_TYPE_NEWS
 from db.pool import get_engine, close_global_engine
 from db.init_db import init_database
 from crawlers.cloak_browser import CloakBrowser
@@ -49,26 +49,32 @@ logger.add(
 # ============================================================
 
 async def get_active_sites() -> list[dict]:
-    """从数据库获取所有有 search_url 的启用网站（含分类与搜索范围配置）"""
+    """从数据库获取新闻爬虫启用的网站（含分类与搜索范围配置）"""
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(text("""
             SELECT id, site_name, site_url, search_url, search_url_title, search_url_body,
                    search_scope_support, category
             FROM crawl_sites
-            WHERE is_active = TRUE AND search_url IS NOT NULL AND search_url != ''
+            WHERE is_active = TRUE
+              AND enable_news_crawl = TRUE
+              AND search_url IS NOT NULL AND search_url != ''
             ORDER BY sort_order
         """))).mappings().fetchall()
     return [dict(r) for r in rows]
 
 
 async def get_all_keywords() -> list[str]:
-    """从数据库获取所有启用的关键词"""
+    """从数据库获取新闻爬虫启用的关键词"""
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(text(
-            "SELECT keyword FROM crawl_keywords WHERE is_active = TRUE ORDER BY priority DESC"
-        ))).mappings().fetchall()
+            """
+            SELECT keyword FROM crawl_keywords
+            WHERE is_active = TRUE AND monitor_type = :mt
+            ORDER BY priority DESC
+            """
+        ), {"mt": MONITOR_TYPE_NEWS})).mappings().fetchall()
     return [r["keyword"] for r in rows]
 
 

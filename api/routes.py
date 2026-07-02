@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query
 from sqlalchemy import text
 from loguru import logger
 
+from config import MONITOR_TYPE_NEWS, VALID_MONITOR_TYPES
 from db.pool import get_engine
 from utils.timezone import APP_TZ, format_app_datetime
 from utils.keyword_hit import (
@@ -300,21 +301,35 @@ async def list_sources():
     engine = await get_engine()
     async with engine.connect() as conn:
         rows = (await conn.execute(
-            text("SELECT id, site_name FROM crawl_sites WHERE is_active = TRUE ORDER BY sort_order")
+            text("""
+                SELECT id, site_name FROM crawl_sites
+                WHERE is_active = TRUE AND enable_news_crawl = TRUE
+                ORDER BY sort_order
+            """)
         )).mappings().fetchall()
         sources = [{"id": r["id"], "site_name": r["site_name"]} for r in rows]
     return {"code": 0, "message": "ok", "data": sources}
 
 
 @router.get("/crawl-keywords")
-async def list_crawl_keywords():
+async def list_crawl_keywords(
+    monitor_type: Optional[str] = Query(None, description="监测类型筛选: news / meeting"),
+):
     """获取爬取关键词配置列表"""
     engine = await get_engine()
+    conditions = []
+    params = {}
+    if monitor_type:
+        if monitor_type not in VALID_MONITOR_TYPES:
+            return {"code": 400, "message": f"monitor_type 须为 {VALID_MONITOR_TYPES}", "data": None}
+        conditions.append("monitor_type = :mt")
+        params["mt"] = monitor_type
+    where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with engine.connect() as conn:
-        rows = (await conn.execute(text("""
-            SELECT id, keyword, keyword_type, is_active, priority, description
-            FROM crawl_keywords ORDER BY priority DESC, id ASC
-        """))).mappings().fetchall()
+        rows = (await conn.execute(text(f"""
+            SELECT id, keyword, keyword_type, monitor_type, is_active, priority, description
+            FROM crawl_keywords{where_clause} ORDER BY priority DESC, id ASC
+        """), params)).mappings().fetchall()
         items = [dict(r) for r in rows]
     return {"code": 0, "message": "ok", "data": items}
 
@@ -323,30 +338,36 @@ async def list_crawl_keywords():
 async def create_crawl_keyword(
     keyword: str = Query(..., min_length=1, description="关键词内容"),
     keyword_type: str = Query("通用", description="关键词分类"),
+    monitor_type: str = Query(MONITOR_TYPE_NEWS, description="监测类型: news / meeting"),
     priority: int = Query(0, description="优先级"),
     description: str = Query("", description="备注说明"),
 ):
     """新增爬取关键词"""
+    if monitor_type not in VALID_MONITOR_TYPES:
+        return {"code": 400, "message": f"monitor_type 须为 {VALID_MONITOR_TYPES}", "data": None}
     engine = await get_engine()
     async with engine.begin() as conn:
         existing = (await conn.execute(
-            text("SELECT id FROM crawl_keywords WHERE keyword = :kw"),
-            {"kw": keyword},
+            text("""
+                SELECT id FROM crawl_keywords
+                WHERE keyword = :kw AND monitor_type = :mt
+            """),
+            {"kw": keyword, "mt": monitor_type},
         )).fetchone()
         if existing:
-            return {"code": 409, "message": "关键词已存在", "data": None}
+            return {"code": 409, "message": "该监测类型下关键词已存在", "data": None}
 
         result = await conn.execute(
             text("""
-                INSERT INTO crawl_keywords (keyword, keyword_type, priority, description)
-                VALUES (:kw, :kt, :pri, :desc)
+                INSERT INTO crawl_keywords (keyword, keyword_type, monitor_type, priority, description)
+                VALUES (:kw, :kt, :mt, :pri, :desc)
                 RETURNING id
             """),
-            {"kw": keyword, "kt": keyword_type, "pri": priority, "desc": description},
+            {"kw": keyword, "kt": keyword_type, "mt": monitor_type, "pri": priority, "desc": description},
         )
         new_id = result.scalar()
-        logger.info(f"[API] 新增关键词: id={new_id}, keyword={keyword}")
-    return {"code": 0, "message": "ok", "data": {"id": new_id, "keyword": keyword}}
+        logger.info(f"[API] 新增关键词: id={new_id}, keyword={keyword}, monitor_type={monitor_type}")
+    return {"code": 0, "message": "ok", "data": {"id": new_id, "keyword": keyword, "monitor_type": monitor_type}}
 
 
 @router.get("/sites")
@@ -358,11 +379,116 @@ async def list_crawl_sites():
             SELECT id, site_name, site_url, search_url_template, search_url,
                    search_url_title, search_url_body, search_scope_support,
                    category, media_type, supervisor,
-                   is_active, sort_order, description
+                   is_active, enable_news_crawl, enable_meeting_monitor,
+                   sort_order, description
             FROM crawl_sites ORDER BY sort_order
         """))).mappings().fetchall()
         items = [dict(r) for r in rows]
     return {"code": 0, "message": "ok", "data": items}
+
+
+@router.get("/meeting/list")
+async def list_meeting_items(
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="每页条数"),
+    keyword: Optional[str] = Query(None, description="关键词（标题/摘要）"),
+    event_type: Optional[str] = Query(None, description="活动类型筛选"),
+    matched_keyword: Optional[str] = Query(None, description="命中关键词"),
+    site_id: Optional[int] = Query(None, description="来源站点 ID"),
+    start_date: Optional[str] = Query(None, description="开始日期 YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="结束日期 YYYY-MM-DD"),
+    sort_by: str = Query("created_at", description="排序: created_at / publish_time / first_seen_at"),
+    sort_order: str = Query("desc", description="asc / desc"),
+):
+    """会议/论坛监测结果列表（分页 + 日期/关键词筛选）"""
+    from datetime import timedelta
+
+    engine = await get_engine()
+    conditions = []
+    params: dict = {}
+
+    if keyword:
+        conditions.append("(m.title ILIKE :kw OR m.summary ILIKE :kw)")
+        params["kw"] = f"%{keyword}%"
+
+    if event_type:
+        conditions.append("m.event_type = :etype")
+        params["etype"] = event_type
+
+    if matched_keyword:
+        conditions.append("m.matched_keyword ILIKE :mkw")
+        params["mkw"] = f"%{matched_keyword}%"
+
+    if site_id:
+        conditions.append("m.crawl_site_id = :sid")
+        params["sid"] = site_id
+
+    if start_date:
+        conditions.append("m.created_at >= :sd")
+        params["sd"] = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=APP_TZ)
+
+    if end_date:
+        ed = datetime.strptime(end_date, "%Y-%m-%d")
+        ed_next = (ed + timedelta(days=1)).replace(tzinfo=APP_TZ)
+        conditions.append("m.created_at < :ed_next")
+        params["ed_next"] = ed_next
+
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+    allowed_sort = {"publish_time", "first_seen_at", "created_at", "title"}
+    if sort_by not in allowed_sort:
+        sort_by = "created_at"
+    sort_col = f"m.{sort_by}"
+    sort_dir = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+    async with engine.connect() as conn:
+        total = (await conn.execute(
+            text(f"SELECT COUNT(*) FROM meeting_items m{where_clause}"), params
+        )).scalar()
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+        offset = (page - 1) * page_size
+
+        rows = (await conn.execute(
+            text(f"""
+                SELECT m.id, m.url, m.title, m.summary, m.source, m.publish_time,
+                       m.event_type, m.matched_keyword, m.crawl_site_id,
+                       m.ai_confidence, m.first_seen_at, m.created_at, m.updated_at,
+                       cs.site_name AS crawl_site_name
+                FROM meeting_items m
+                LEFT JOIN crawl_sites cs ON cs.id = m.crawl_site_id
+                {where_clause}
+                ORDER BY {sort_col} {sort_dir} NULLS LAST, m.id DESC
+                LIMIT :limit OFFSET :offset
+            """),
+            {**params, "limit": page_size, "offset": offset},
+        )).mappings().fetchall()
+
+        items = [_normalize_meeting_item(dict(r)) for r in rows]
+
+        event_rows = (await conn.execute(
+            text("""
+                SELECT DISTINCT event_type FROM meeting_items
+                WHERE event_type IS NOT NULL AND event_type != ''
+                ORDER BY event_type
+            """)
+        )).fetchall()
+        event_types = [r[0] for r in event_rows if r[0]]
+
+    logger.info(f"[API] 会议列表: page={page}, total={total}")
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "items": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": total_pages,
+            },
+            "event_types": event_types,
+        },
+    }
 
 
 @router.get("/stats")
@@ -395,6 +521,15 @@ async def get_stats():
             "categories": categories,
         },
     }
+
+
+def _normalize_meeting_item(item: dict) -> dict:
+    for field in ("publish_time", "first_seen_at", "created_at", "updated_at"):
+        if isinstance(item.get(field), datetime):
+            item[field] = format_app_datetime(item[field])
+    if item.get("ai_confidence") is not None:
+        item["ai_confidence"] = round(float(item["ai_confidence"]), 2)
+    return item
 
 
 def _normalize_list_item(item: dict) -> dict:

@@ -24,6 +24,8 @@ CATEGORY_HANDLERS = {
     "襄阳市": "hubei",
     "鄂州市": "hubei",
     "荆门市": "hubei",
+    "百度": "baidu",
+    "百度搜索": "baidu",
 }
 
 __all__ = ["get_search_handler", "CATEGORY_HANDLERS"]

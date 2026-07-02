@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from loguru import logger
 
-from config import ALL_TABLE_SCHEMAS, DBConfig, SEARCH_KEYWORDS
+from config import ALL_TABLE_SCHEMAS, DBConfig, SEARCH_KEYWORDS, MEETING_ITEMS_SCHEMA, MONITOR_TYPE_NEWS, MeetingConfig
 from db.pool import get_engine
 
 # 基线版本（重构后首次初始化记为 v1；后续增量从 v2 起追加）
@@ -376,11 +376,13 @@ async def _insert_news_sites(conn, sites):
                     INSERT INTO crawl_sites (
                         site_name, site_url, search_url_template, search_url,
                         search_url_title, search_url_body, search_scope_support,
-                        category, media_type, supervisor, sort_order, is_active
+                        category, media_type, supervisor, sort_order, is_active,
+                        enable_news_crawl, enable_meeting_monitor
                     ) VALUES (
                         :name, :url, :tmpl, :surl,
                         :title_url, :body_url, :scope,
-                        :category, :media_type, :supervisor, :order, :active
+                        :category, :media_type, :supervisor, :order, :active,
+                        :enable_news, :enable_meeting
                     )
                     ON CONFLICT (site_name) DO NOTHING
                 """),
@@ -397,6 +399,8 @@ async def _insert_news_sites(conn, sites):
                     supervisor=site["supervisor"],
                     order=site["sort_order"],
                     active=site.get("is_active", True),
+                    enable_news=site.get("enable_news_crawl", True),
+                    enable_meeting=site.get("enable_meeting_monitor", False),
                 ),
             )
             inserted += 1
@@ -424,8 +428,174 @@ async def _migrate_v2_disable_default_sites(conn) -> None:
         )
 
 
+async def _migrate_v3_meeting_monitor_schema(conn) -> None:
+    """新增站点/关键词监测类型字段，以及 meeting_items 表"""
+    await conn.execute(text("""
+        ALTER TABLE crawl_sites
+            ADD COLUMN IF NOT EXISTS enable_news_crawl BOOLEAN NOT NULL DEFAULT TRUE,
+            ADD COLUMN IF NOT EXISTS enable_meeting_monitor BOOLEAN NOT NULL DEFAULT FALSE
+    """))
+    await conn.execute(text("""
+        UPDATE crawl_sites
+        SET enable_news_crawl = TRUE
+        WHERE enable_news_crawl IS NULL
+    """))
+
+    await conn.execute(text("""
+        ALTER TABLE crawl_keywords
+            ADD COLUMN IF NOT EXISTS monitor_type VARCHAR(20) NOT NULL DEFAULT 'news'
+    """))
+    await conn.execute(text("""
+        UPDATE crawl_keywords SET monitor_type = 'news' WHERE monitor_type IS NULL
+    """))
+
+    await conn.execute(text(
+        "ALTER TABLE crawl_keywords DROP CONSTRAINT IF EXISTS crawl_keywords_keyword_key"
+    ))
+    await conn.execute(text("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'crawl_keywords_keyword_monitor_type_key'
+            ) THEN
+                ALTER TABLE crawl_keywords
+                    ADD CONSTRAINT crawl_keywords_keyword_monitor_type_key
+                    UNIQUE (keyword, monitor_type);
+            END IF;
+        END $$
+    """))
+
+    for stmt in _split_sql(MEETING_ITEMS_SCHEMA):
+        if stmt.strip():
+            await conn.execute(text(stmt))
+
+
+_MEETING_SITE_NAME = "人民日报（人民网）"
+_BAIDU_NEWS_SITE_NAME = "百度新闻"
+_BAIDU_WEB_SITE_NAME = "百度搜索"
+_MEETING_SEED_KEYWORDS = ("AI", "智能制造")
+
+
+async def _migrate_v4_meeting_peopledaily_seed(conn) -> None:
+    """启用人民日报会议监测，写入会议关键词"""
+    await conn.execute(
+        text("""
+            UPDATE crawl_sites
+            SET enable_meeting_monitor = TRUE
+            WHERE site_name = :name
+        """),
+        {"name": _MEETING_SITE_NAME},
+    )
+    for kw in _MEETING_SEED_KEYWORDS:
+        await conn.execute(
+            text("""
+                INSERT INTO crawl_keywords (keyword, keyword_type, monitor_type, priority, is_active)
+                VALUES (:kw, '会议监测', 'meeting', 10, TRUE)
+                ON CONFLICT (keyword, monitor_type) DO NOTHING
+            """),
+            {"kw": kw},
+        )
+
+
+async def _migrate_v5_meeting_notify_tables(conn) -> None:
+    """历史版本占位（邮件通知已移除，v8 清理表结构）"""
+    pass
+
+
+async def _migrate_v6_baidu_meeting_site(conn) -> None:
+    await conn.execute(
+        text("""
+            INSERT INTO crawl_sites (
+                site_name, site_url, search_url_template, search_url,
+                search_scope_support, category, media_type, supervisor,
+                sort_order, is_active, enable_news_crawl, enable_meeting_monitor,
+                description
+            ) VALUES (
+                :name, :url, :tmpl, :surl,
+                'none', '百度', '聚合搜索', '百度',
+                5, TRUE, FALSE, TRUE,
+                '会议监测：多关键词空格合并一次检索'
+            )
+            ON CONFLICT (site_name) DO UPDATE SET
+                enable_meeting_monitor = TRUE,
+                category = EXCLUDED.category,
+                search_url = EXCLUDED.search_url,
+                description = EXCLUDED.description,
+                updated_at = NOW()
+        """),
+        dict(
+            name=_BAIDU_NEWS_SITE_NAME,
+            url="https://news.baidu.com",
+            tmpl="https://www.baidu.com/s?tn=news",
+            surl="https://www.baidu.com/s?ie=utf-8&medium=0&rtt=1&bsst=1&cl=2&tn=news&word={keyword}",
+        ),
+    )
+
+
+async def _migrate_v7_web_search_engines(conn) -> None:
+    """停用百度新闻 tab，启用百度网页搜索"""
+    await conn.execute(
+        text("""
+            UPDATE crawl_sites
+            SET enable_meeting_monitor = FALSE, updated_at = NOW()
+            WHERE site_name = :old_name
+        """),
+        {"old_name": _BAIDU_NEWS_SITE_NAME},
+    )
+
+    await conn.execute(
+        text("""
+            INSERT INTO crawl_sites (
+                site_name, site_url, search_url_template, search_url,
+                search_scope_support, category, media_type, supervisor,
+                sort_order, is_active, enable_news_crawl, enable_meeting_monitor,
+                description
+            ) VALUES (
+                :name, :url, :tmpl, :surl,
+                'none', :cat, '搜索引擎', :supervisor,
+                :ord, TRUE, FALSE, TRUE,
+                '会议监测：多关键词空格合并一次网页检索'
+            )
+            ON CONFLICT (site_name) DO UPDATE SET
+                enable_meeting_monitor = TRUE,
+                enable_news_crawl = FALSE,
+                category = EXCLUDED.category,
+                site_url = EXCLUDED.site_url,
+                search_url = EXCLUDED.search_url,
+                description = EXCLUDED.description,
+                updated_at = NOW()
+        """),
+        dict(
+            name=_BAIDU_WEB_SITE_NAME,
+            url="https://www.baidu.com",
+            tmpl="https://www.baidu.com/s?wd={keyword}",
+            surl="https://www.baidu.com/s?ie=utf-8&wd={keyword}",
+            cat="百度搜索",
+            supervisor="百度搜索",
+            ord=4,
+        ),
+    )
+
+
+async def _migrate_v8_drop_meeting_notify(conn) -> None:
+    """移除邮件通知相关表与字段"""
+    await conn.execute(text("DROP TABLE IF EXISTS meeting_notify_logs"))
+    await conn.execute(text("DROP TABLE IF EXISTS meeting_notify_recipients"))
+    await conn.execute(text("DROP INDEX IF EXISTS idx_meeting_items_notified"))
+    await conn.execute(text("""
+        ALTER TABLE meeting_items DROP COLUMN IF EXISTS notified_at
+    """))
+
+
 MIGRATIONS: list = [
     (2, "默认停用央视网、求是网、经济日报爬取", _migrate_v2_disable_default_sites, None),
+    (3, "站点/关键词监测类型字段 + meeting_items 表", _migrate_v3_meeting_monitor_schema, None),
+    (4, "人民日报会议监测种子：站点开关 + AI/智能制造关键词", _migrate_v4_meeting_peopledaily_seed, None),
+    (5, "会议通知收件人表 + 发送记录表", _migrate_v5_meeting_notify_tables, None),
+    (6, "百度新闻会议监测站点", _migrate_v6_baidu_meeting_site, None),
+    (7, "改为百度网页搜索监测", _migrate_v7_web_search_engines, None),
+    (8, "移除会议监测邮件通知表与字段", _migrate_v8_drop_meeting_notify, None),
 ]
 
 
@@ -442,11 +612,11 @@ async def _insert_default_keywords(conn):
         for kw in DEFAULT_KEYWORDS:
             await conn.execute(
                 text("""
-                    INSERT INTO crawl_keywords (keyword, keyword_type, priority)
-                    VALUES (:kw, '通用', 0)
-                    ON CONFLICT (keyword) DO NOTHING
+                    INSERT INTO crawl_keywords (keyword, keyword_type, monitor_type, priority)
+                    VALUES (:kw, '通用', :mt, 0)
+                    ON CONFLICT (keyword, monitor_type) DO NOTHING
                 """),
-                dict(kw=kw),
+                dict(kw=kw, mt=MONITOR_TYPE_NEWS),
             )
         logger.info(f"[DB Init] 已插入 {len(DEFAULT_KEYWORDS)} 条默认关键词")
     else:
