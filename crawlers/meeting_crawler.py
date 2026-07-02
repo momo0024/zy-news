@@ -71,12 +71,6 @@ def _filter_sites_by_group(sites: list[dict], group: str) -> list[dict]:
     return sites
 
 
-def _meeting_keep_days(site: dict) -> int:
-    if _is_search_engine_site(site):
-        return MeetingConfig.SEARCH_ENGINE_KEEP_RECENT_DAYS
-    return MeetingConfig.KEEP_RECENT_DAYS
-
-
 def _item_hits_keywords(item: dict, keywords: list[str]) -> bool:
     """标题或摘要是否命中任一配置关键词（不区分大小写）"""
     text = f"{item.get('title', '')} {item.get('abstract', '')} {item.get('snippet', '')}"
@@ -229,7 +223,7 @@ async def _crawl_site_meeting(site: dict, keywords: list[str], browser: CloakBro
     site_id = site.get("id")
     site_url = site.get("site_url", "")
     category = site.get("category", "")
-    keep_days = _meeting_keep_days(site)
+    keep_days = MeetingConfig.KEEP_RECENT_DAYS
     is_search = _is_search_engine_site(site)
     crawl_modes = resolve_crawl_modes(site)
 
@@ -368,19 +362,14 @@ async def crawl_meeting_sites(
     logger.info(f"会议/论坛监测启动 [{group_label}]")
     logger.info(f"站点: {', '.join(s['site_name'] for s in sites)}")
     logger.info(f"主题关键词: {', '.join(keywords)}")
+    logger.info(f"时间窗口: 近 {MeetingConfig.KEEP_RECENT_DAYS} 天")
     has_search = any(_is_search_engine_site(s) for s in sites)
-    has_central = any(not _is_search_engine_site(s) for s in sites)
-    if has_central:
-        logger.info(f"中央媒体时间窗口: 近 {MeetingConfig.KEEP_RECENT_DAYS} 天")
     if has_search:
         logger.info(
             f"搜索引擎检索词: {' '.join(keywords)} "
             f"{' '.join(MeetingConfig.SEARCH_ENGINE_EVENT_KEYWORDS)}"
         )
-        logger.info(
-            f"搜索引擎时间窗口: 近 {MeetingConfig.SEARCH_ENGINE_KEEP_RECENT_DAYS} 天 | "
-            f"最多 {MeetingConfig.SEARCH_ENGINE_MAX_PAGES} 页"
-        )
+        logger.info(f"搜索引擎最多翻页: {MeetingConfig.SEARCH_ENGINE_MAX_PAGES} 页")
     logger.info("=" * 60)
 
     total_inserted = 0

@@ -226,8 +226,8 @@ class CrawlerConfig:
 class MeetingConfig:
     """会议/论坛监测配置"""
 
-    # 保留近 N 天（每 2 天跑一次，默认 14 天窗口避免漏抓）
-    KEEP_RECENT_DAYS: int = _env_int("MEETING_KEEP_RECENT_DAYS", 14)
+    # 保留近 N 天（中央媒体与搜索引擎共用）
+    KEEP_RECENT_DAYS: int = _env_int("MEETING_KEEP_RECENT_DAYS", 3)
     SCHEDULE_INTERVAL_DAYS: int = _env_int("MEETING_SCHEDULE_INTERVAL_DAYS", 2)
     SCHEDULE_TIME: str = _env("MEETING_SCHEDULE_TIME", "09:00")
 
@@ -236,8 +236,6 @@ class MeetingConfig:
         "MEETING_SEARCH_ENGINE_COMBINED_KEYWORDS",
         _env_bool("MEETING_BAIDU_COMBINED_KEYWORDS", True),
     )
-    # 搜索引擎监测：近 N 天、最多翻页数（与中央媒体站点独立）
-    SEARCH_ENGINE_KEEP_RECENT_DAYS: int = _env_int("MEETING_SEARCH_ENGINE_KEEP_RECENT_DAYS", 3)
     SEARCH_ENGINE_MAX_PAGES: int = _env_int("MEETING_SEARCH_ENGINE_MAX_PAGES", 2)
     # 与主题词（AI/智能制造）一并空格合并进检索 query 的会议类词
     SEARCH_ENGINE_EVENT_KEYWORDS: list[str] = [
